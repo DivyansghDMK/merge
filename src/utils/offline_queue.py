@@ -250,10 +250,100 @@ class OfflineQueue:
     
     def _sync_item(self, item: Dict[str, Any]) -> bool:
         """
-        Attempt to sync single item to backend
-        Override this method or set a callback
+        Attempt to sync single item to backend or cloud storage
+        Supports both BackendAPI and CloudUploader (S3)
         """
-        # Import backend API
+        # Try cloud uploader first (for S3 uploads)
+        try:
+            from .cloud_uploader import get_cloud_uploader
+            cloud_uploader = get_cloud_uploader()
+            
+            # Handle cloud-specific queue items
+            if item['type'] == 'cloud_report':
+                # Upload report to S3
+                file_path = item['data'].get('file_path')
+                metadata = item['data'].get('metadata', {})
+                
+                if file_path and os.path.exists(file_path):
+                    # Temporarily disable offline queue check to force upload
+                    original_offline_queue = cloud_uploader.offline_queue
+                    cloud_uploader.offline_queue = None  # Disable queue check during sync
+                    
+                    try:
+                        result = cloud_uploader.upload_report(file_path, metadata)
+                    finally:
+                        cloud_uploader.offline_queue = original_offline_queue  # Restore
+                    
+                    if result.get('status') == 'success':
+                        print(f"✅ Synced report to S3: {os.path.basename(file_path)}")
+                        return True
+                    elif result.get('status') == 'already_uploaded':
+                        # Already uploaded, consider it success
+                        return True
+                    else:
+                        print(f"⚠️ S3 upload failed: {result.get('message', 'Unknown error')}")
+                        return False
+                else:
+                    print(f"⚠️ Report file not found: {file_path}")
+                    return False
+            
+            elif item['type'] == 'cloud_user_signup':
+                # Upload user signup to S3
+                user_data = item['data'].get('user_data', {})
+                
+                # Temporarily disable offline queue check to force upload
+                original_offline_queue = cloud_uploader.offline_queue
+                cloud_uploader.offline_queue = None  # Disable queue check during sync
+                
+                try:
+                    result = cloud_uploader.upload_user_signup(user_data)
+                finally:
+                    cloud_uploader.offline_queue = original_offline_queue  # Restore
+                
+                if result.get('status') == 'success':
+                    print(f"✅ Synced user signup to S3: {user_data.get('username', 'unknown')}")
+                    return True
+                elif result.get('status') == 'already_uploaded':
+                    # Already uploaded, consider it success
+                    return True
+                else:
+                    print(f"⚠️ S3 user signup failed: {result.get('message', 'Unknown error')}")
+                    return False
+            
+            elif item['type'] == 'cloud_complete_package':
+                # Upload complete report package to S3
+                pdf_path = item['data'].get('pdf_path')
+                patient_data = item['data'].get('patient_data', {})
+                ecg_data_file = item['data'].get('ecg_data_file')
+                report_metadata = item['data'].get('report_metadata', {})
+                
+                if pdf_path and os.path.exists(pdf_path):
+                    # Temporarily disable offline queue check to force upload
+                    original_offline_queue = cloud_uploader.offline_queue
+                    cloud_uploader.offline_queue = None  # Disable queue check during sync
+                    
+                    try:
+                        result = cloud_uploader.upload_complete_report_package(
+                            pdf_path, patient_data, ecg_data_file, report_metadata
+                        )
+                    finally:
+                        cloud_uploader.offline_queue = original_offline_queue  # Restore
+                    
+                    if result.get('status') == 'success':
+                        print(f"✅ Synced complete package to S3: {os.path.basename(pdf_path)}")
+                        return True
+                    else:
+                        print(f"⚠️ S3 package upload failed: {result.get('message', 'Unknown error')}")
+                        return False
+                else:
+                    print(f"⚠️ PDF file not found: {pdf_path}")
+                    return False
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"⚠️ Cloud uploader error: {e}")
+        
+        # Fallback to BackendAPI for other data types
         try:
             from .backend_api import get_backend_api
             backend_api = get_backend_api()
@@ -285,8 +375,8 @@ class OfflineQueue:
             return result.get('status') == 'success'
             
         except ImportError:
-            # Backend API not available - use cloud uploader as fallback
-            print(f"ℹ️  Backend API not available for {item['type']}")
+            # Neither backend API nor cloud uploader available
+            print(f"ℹ️  No upload service available for {item['type']}")
             return False
         except Exception as e:
             print(f"⚠️  Sync error for {item['type']}: {e}")

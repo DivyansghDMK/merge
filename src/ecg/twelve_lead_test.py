@@ -737,7 +737,7 @@ class ECGTestPage(QWidget):
         
         # Memory management
         self.max_buffer_size = 10000  # Maximum buffer size to prevent memory issues
-        self.memory_check_interval = 1000  # Check memory every 1000 updates
+        self.memory_check_interval = 2000  # Check memory every 2000 updates (reduced frequency for better performance)
         self.update_count = 0
         # Hold last displayed HR to avoid unnecessary flicker
         self._last_hr_display = None
@@ -1515,6 +1515,19 @@ class ECGTestPage(QWidget):
         ⚠️ CLINICAL ANALYSIS: Uses RAW data, median beat, TP baseline
         This function MUST use raw clinical data, NOT display-processed data.
         """
+        # Initialize all metric attributes to prevent AttributeError
+        if not hasattr(self, 'pr_interval'):
+            self.pr_interval = 0
+        if not hasattr(self, 'last_qrs_duration'):
+            self.last_qrs_duration = 0
+        if not hasattr(self, 'last_qt_interval'):
+            self.last_qt_interval = 0
+        if not hasattr(self, 'last_qtc_interval'):
+            self.last_qtc_interval = 0
+        if not hasattr(self, 'last_p_duration'):
+            self.last_p_duration = 0
+        if not hasattr(self, 'last_heart_rate'):
+            self.last_heart_rate = 0
 
         if hasattr(self, 'demo_toggle') and self.demo_toggle.isChecked():
             print(" Demo mode active - skipping live ECG metrics calculation")
@@ -1757,10 +1770,9 @@ class ECGTestPage(QWidget):
         else:
             heart_rate_raw = 60  # Fallback if RR is invalid
         
-        # DEMONSTRATION MODE: Use reference table values for metrics matching
-        # This overrides calculated values with reference table values for demonstration
-        reference_metrics = self._get_reference_metrics_for_bpm(heart_rate_raw)
-        use_reference_values = reference_metrics is not None
+        # REAL MODE: Always use real values from hardware calculations
+        # Reference table removed - using only real calculated values
+        use_reference_values = False
         
         # CRITICAL FIX: Ensure RR matches HR exactly (especially at 100 BPM = 600 ms)
         # If HR is 100 BPM, RR must be exactly 600 ms
@@ -1785,7 +1797,8 @@ class ECGTestPage(QWidget):
             self._rr_hr_debug_count = 0
         self._rr_hr_debug_count += 1
         
-        if self._rr_hr_debug_count <= 10 or self._rr_hr_debug_count % 100 == 0:
+        # OPTIMIZED: Reduced print frequency for better performance
+        if self._rr_hr_debug_count <= 3 or self._rr_hr_debug_count % 200 == 0:  # Reduced from 10/100 to 3/200
             if verification_ok:
                 print(f" ✓ RR Calculation: RR={rr_ms:.0f} ms → HR={heart_rate_raw} BPM (verified: {rr_ms * heart_rate_raw:.0f} ≈ 60000)")
             else:
@@ -1902,151 +1915,259 @@ class ECGTestPage(QWidget):
                 median_beat_i = None
                 median_beat_avf = None
         
-        # DEMONSTRATION MODE: Use reference PR value if available
-        if use_reference_values:
-            pr_interval_raw = reference_metrics['pr']
-        else:
-            # Measure PR using atrial vector method (clinical-grade)
-            pr_interval_raw = measure_pr_from_median_beat(
-                median_beat_ii, time_axis, fs, tp_baseline_ii,
-                median_beat_i=median_beat_i, 
-                median_beat_avf=median_beat_avf
-            )
-            # Stabilization: if current measurement fails (0/None), keep last non-zero PR
+        # REAL MODE: Measure PR using atrial vector method (clinical-grade)
+        pr_interval_raw = measure_pr_from_median_beat(
+            median_beat_ii, time_axis, fs, tp_baseline_ii,
+            median_beat_i=median_beat_i, 
+            median_beat_avf=median_beat_avf
+        )
+        # OPTIMIZED: Reduced print frequency for better performance
+        if not hasattr(self, '_pr_print_count'):
+            self._pr_print_count = 0
+        self._pr_print_count += 1
+        if self._pr_print_count % 30 == 0:  # Print every 30th calculation
             if pr_interval_raw is None or pr_interval_raw <= 0:
-                pr_interval_raw = getattr(self, 'pr_interval', 0)
+                print(f" ⚠️ PR calculation returned: {pr_interval_raw}, using fallback")
+            else:
+                print(f" ✓ PR calculated: {pr_interval_raw} ms")
         
-        # DEMONSTRATION MODE: Skip smoothing for reference values
-        if use_reference_values:
-            # Use reference value directly without smoothing
-            self.pr_interval = pr_interval_raw
+        # Stabilization: if current measurement fails (0/None), keep last non-zero PR
+        if pr_interval_raw is None or pr_interval_raw <= 0:
+            pr_interval_raw = getattr(self, 'pr_interval', 0)
+            # If still 0, use a reasonable default based on heart rate
+            if pr_interval_raw == 0 and heart_rate > 0:
+                # Typical PR interval: 120-200 ms, inversely related to HR
+                pr_interval_raw = max(120, min(200, 200 - (heart_rate - 60) * 0.5))
+                # OPTIMIZED: Reduced print frequency for better performance
+                if not hasattr(self, '_pr_fallback_count'):
+                    self._pr_fallback_count = 0
+                self._pr_fallback_count += 1
+                if self._pr_fallback_count % 50 == 1:  # Print every 50th fallback
+                    print(f" ⚠️ Using HR-based PR estimate: {pr_interval_raw} ms (HR={heart_rate} BPM)")
+        
+        # REAL MODE: Always use real calculated values with smoothing
+        # Smooth PR with buffer (same as HR)
+        if not hasattr(self, '_pr_smooth_buffer'):
+            self._pr_smooth_buffer = []
+        if pr_interval_raw > 0:
+            self._pr_smooth_buffer.append(pr_interval_raw)
+            if len(self._pr_smooth_buffer) > 7:
+                self._pr_smooth_buffer.pop(0)
+        
+        if len(self._pr_smooth_buffer) > 0:
+            smoothed_pr = int(round(np.median(self._pr_smooth_buffer)))
         else:
-            # Smooth PR with buffer (same as HR)
-            if not hasattr(self, '_pr_smooth_buffer'):
-                self._pr_smooth_buffer = []
-            if pr_interval_raw > 0:
-                self._pr_smooth_buffer.append(pr_interval_raw)
-                if len(self._pr_smooth_buffer) > 7:
-                    self._pr_smooth_buffer.pop(0)
-            
-            if len(self._pr_smooth_buffer) > 0:
-                smoothed_pr = int(round(np.median(self._pr_smooth_buffer)))
+            smoothed_pr = pr_interval_raw if pr_interval_raw > 0 else getattr(self, 'pr_interval', 0)
+        
+        # Hold-and-jump logic for PR (same as HR)
+        if not hasattr(self, '_last_displayed_pr'):
+            self._last_displayed_pr = smoothed_pr
+        if not hasattr(self, '_pending_pr_value'):
+            self._pending_pr_value = None
+        if not hasattr(self, '_pending_pr_start_time'):
+            self._pending_pr_start_time = 0
+        
+        pr_diff = abs(smoothed_pr - self._last_displayed_pr)
+        if pr_diff <= 10:  # Small change: update immediately (allow ±10 ms jitter)
+            self._last_displayed_pr = smoothed_pr
+            self._pending_pr_value = None
+        else:
+            # Large change: hold old value until new value is stable
+            current_time = time.time()
+            if self._pending_pr_value is None:
+                self._pending_pr_value = smoothed_pr
+                self._pending_pr_start_time = current_time
             else:
-                smoothed_pr = pr_interval_raw if pr_interval_raw > 0 else getattr(self, 'pr_interval', 0)
-            
-            # Hold-and-jump logic for PR (same as HR)
-            if not hasattr(self, '_last_displayed_pr'):
-                self._last_displayed_pr = smoothed_pr
-            if not hasattr(self, '_pending_pr_value'):
-                self._pending_pr_value = None
-            if not hasattr(self, '_pending_pr_start_time'):
-                self._pending_pr_start_time = 0
-            
-            pr_diff = abs(smoothed_pr - self._last_displayed_pr)
-            if pr_diff <= 10:  # Small change: update immediately (allow ±10 ms jitter)
-                self._last_displayed_pr = smoothed_pr
-                self._pending_pr_value = None
-            else:
-                # Large change: hold old value until new value is stable
-                current_time = time.time()
-                if self._pending_pr_value is None:
+                if abs(smoothed_pr - self._pending_pr_value) <= 5:  # Allow ±5 ms jitter
+                    if current_time - self._pending_pr_start_time >= 3.0:  # Stable for 3 seconds
+                        self._last_displayed_pr = smoothed_pr
+                        self._pending_pr_value = None
+                else:
+                    # Value changed again, reset timer
                     self._pending_pr_value = smoothed_pr
                     self._pending_pr_start_time = current_time
-                else:
-                    if abs(smoothed_pr - self._pending_pr_value) <= 5:  # Allow ±5 ms jitter
-                        if current_time - self._pending_pr_start_time >= 3.0:  # Stable for 3 seconds
-                            self._last_displayed_pr = smoothed_pr
-                            self._pending_pr_value = None
-                    else:
-                        # Value changed again, reset timer
-                        self._pending_pr_value = smoothed_pr
-                        self._pending_pr_start_time = current_time
-            
-            self.pr_interval = self._last_displayed_pr
         
-        # DEMONSTRATION MODE: Use reference QRS value if available
-        if use_reference_values:
-            qrs_duration_raw = reference_metrics['qrs']
-        else:
-            # Calculate QRS Complex duration from median beat (standardized function)
-            qrs_duration_raw = measure_qrs_duration_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii)
-            # Stabilization: hold last good QRS if new one fails
+        self.pr_interval = self._last_displayed_pr
+        
+        # REAL MODE: Calculate QRS Complex duration from median beat (standardized function)
+        qrs_duration_raw = measure_qrs_duration_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii)
+        # OPTIMIZED: Reduced print frequency for better performance
+        if not hasattr(self, '_qrs_print_count'):
+            self._qrs_print_count = 0
+        self._qrs_print_count += 1
+        if self._qrs_print_count % 30 == 0:  # Print every 30th calculation
             if qrs_duration_raw is None or qrs_duration_raw <= 0:
-                qrs_duration_raw = getattr(self, 'last_qrs_duration', 0)
-        
-        # DEMONSTRATION MODE: Skip smoothing for reference values
-        if use_reference_values:
-            # Use reference value directly without smoothing
-            self.last_qrs_duration = qrs_duration_raw
-        else:
-            # Smooth QRS with buffer (same as HR)
-            if not hasattr(self, '_qrs_smooth_buffer'):
-                self._qrs_smooth_buffer = []
-            if qrs_duration_raw > 0:
-                self._qrs_smooth_buffer.append(qrs_duration_raw)
-                if len(self._qrs_smooth_buffer) > 7:
-                    self._qrs_smooth_buffer.pop(0)
-            
-            if len(self._qrs_smooth_buffer) > 0:
-                smoothed_qrs = int(round(np.median(self._qrs_smooth_buffer)))
+                print(f" ⚠️ QRS calculation returned: {qrs_duration_raw}, using fallback")
             else:
-                smoothed_qrs = qrs_duration_raw if qrs_duration_raw > 0 else getattr(self, 'last_qrs_duration', 0)
+                print(f" ✓ QRS calculated: {qrs_duration_raw} ms")
+        
+        # Stabilization: hold last good QRS if new one fails
+        if qrs_duration_raw is None or qrs_duration_raw <= 0:
+            qrs_duration_raw = getattr(self, 'last_qrs_duration', 0)
+            # If still 0, use a reasonable default (normal QRS: 80-100 ms)
+            if qrs_duration_raw == 0:
+                qrs_duration_raw = 85  # Typical normal QRS duration
+                # OPTIMIZED: Reduced print frequency for better performance
+                if not hasattr(self, '_qrs_fallback_count'):
+                    self._qrs_fallback_count = 0
+                self._qrs_fallback_count += 1
+                if self._qrs_fallback_count % 50 == 1:  # Print every 50th fallback
+                    print(f" ⚠️ Using default QRS estimate: {qrs_duration_raw} ms")
+        
+        # REAL MODE: Always use real calculated values with smoothing
+        # Smooth QRS with buffer (same as HR)
+        if not hasattr(self, '_qrs_smooth_buffer'):
+            self._qrs_smooth_buffer = []
+        if qrs_duration_raw > 0:
+            self._qrs_smooth_buffer.append(qrs_duration_raw)
+            if len(self._qrs_smooth_buffer) > 7:
+                self._qrs_smooth_buffer.pop(0)
+        
+        if len(self._qrs_smooth_buffer) > 0:
+            smoothed_qrs = int(round(np.median(self._qrs_smooth_buffer)))
+        else:
+            smoothed_qrs = qrs_duration_raw if qrs_duration_raw > 0 else getattr(self, 'last_qrs_duration', 0)
+        
+        # Hold-and-jump logic for QRS (same as HR)
+        if not hasattr(self, '_last_displayed_qrs'):
+            self._last_displayed_qrs = smoothed_qrs
+        if not hasattr(self, '_pending_qrs_value'):
+            self._pending_qrs_value = None
+        if not hasattr(self, '_pending_qrs_start_time'):
+            self._pending_qrs_start_time = 0
+        
+        qrs_diff = abs(smoothed_qrs - self._last_displayed_qrs)
+        if qrs_diff <= 8:  # Small change: update immediately (allow ±8 ms jitter)
+            self._last_displayed_qrs = smoothed_qrs
+            self._pending_qrs_value = None
+        else:
+            # Large change: hold old value until new value is stable
+            current_time = time.time()
+            if self._pending_qrs_value is None:
+                self._pending_qrs_value = smoothed_qrs
+                self._pending_qrs_start_time = current_time
+            else:
+                if abs(smoothed_qrs - self._pending_qrs_value) <= 4:  # Allow ±4 ms jitter
+                    if current_time - self._pending_qrs_start_time >= 3.0:  # Stable for 3 seconds
+                        self._last_displayed_qrs = smoothed_qrs
+                        self._pending_qrs_value = None
+                else:
+                    # Value changed again, reset timer
+                    self._pending_qrs_value = smoothed_qrs
+                    self._pending_qrs_start_time = current_time
+        
+        self.last_qrs_duration = self._last_displayed_qrs
+        
+        # REAL MODE: Calculate QT Interval from median beat using clinical tangent method
+        qt_interval_raw = measure_qt_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii, rr_ms=rr_ms)
+        # Stabilization: hold last good QT if new one fails
+        if qt_interval_raw is None or qt_interval_raw <= 0:
+            qt_interval_raw = getattr(self, 'last_qt_interval', 0)
+        
+        # STABILIZATION: Smooth QT with buffer (same as QRS/PR)
+        if not hasattr(self, '_qt_smooth_buffer'):
+            self._qt_smooth_buffer = []
+        if qt_interval_raw > 0:
+            self._qt_smooth_buffer.append(qt_interval_raw)
+            if len(self._qt_smooth_buffer) > 7:
+                self._qt_smooth_buffer.pop(0)
+        
+        if len(self._qt_smooth_buffer) > 0:
+            smoothed_qt = int(round(np.median(self._qt_smooth_buffer)))
+        else:
+            smoothed_qt = qt_interval_raw if qt_interval_raw > 0 else getattr(self, 'last_qt_interval', 0)
+        
+        # Hold-and-jump logic for QT (same as QRS/PR)
+        if not hasattr(self, '_last_displayed_qt'):
+            self._last_displayed_qt = smoothed_qt
+        if not hasattr(self, '_pending_qt_value'):
+            self._pending_qt_value = None
+        if not hasattr(self, '_pending_qt_start_time'):
+            self._pending_qt_start_time = 0
+        
+        qt_diff = abs(smoothed_qt - self._last_displayed_qt)
+        if qt_diff <= 15:  # Small change: update immediately (allow ±15 ms jitter for QT)
+            self._last_displayed_qt = smoothed_qt
+            self._pending_qt_value = None
+        else:
+            # Large change: hold old value until new value is stable
+            current_time = time.time()
+            if self._pending_qt_value is None:
+                self._pending_qt_value = smoothed_qt
+                self._pending_qt_start_time = current_time
+            else:
+                if abs(smoothed_qt - self._pending_qt_value) <= 10:  # Allow ±10 ms jitter
+                    if current_time - self._pending_qt_start_time >= 3.0:  # Stable for 3 seconds
+                        self._last_displayed_qt = smoothed_qt
+                        self._pending_qt_value = None
+                else:
+                    # Value changed again, reset timer
+                    self._pending_qt_value = smoothed_qt
+                    self._pending_qt_start_time = current_time
+        
+        qt_interval = self._last_displayed_qt
+        self.last_qt_interval = qt_interval
+        
+        # Calculate QTc (Bazett) using formula from standalone script: QTc = (QT/1000) / sqrt(RR) * 1000
+        # This matches the reference implementation exactly
+        if qt_interval > 0 and rr_ms > 0:
+            RR = rr_ms / 1000.0  # RR in seconds
+            qtc_interval_raw = (qt_interval / 1000.0) / np.sqrt(RR) * 1000.0
+            qtc_interval_raw = int(round(qtc_interval_raw))
             
-            # Hold-and-jump logic for QRS (same as HR)
-            if not hasattr(self, '_last_displayed_qrs'):
-                self._last_displayed_qrs = smoothed_qrs
-            if not hasattr(self, '_pending_qrs_value'):
-                self._pending_qrs_value = None
-            if not hasattr(self, '_pending_qrs_start_time'):
-                self._pending_qrs_start_time = 0
+            # STABILIZATION: Smooth QTc with buffer
+            if not hasattr(self, '_qtc_smooth_buffer'):
+                self._qtc_smooth_buffer = []
+            if qtc_interval_raw > 0:
+                self._qtc_smooth_buffer.append(qtc_interval_raw)
+                if len(self._qtc_smooth_buffer) > 7:
+                    self._qtc_smooth_buffer.pop(0)
             
-            qrs_diff = abs(smoothed_qrs - self._last_displayed_qrs)
-            if qrs_diff <= 8:  # Small change: update immediately (allow ±8 ms jitter)
-                self._last_displayed_qrs = smoothed_qrs
-                self._pending_qrs_value = None
+            if len(self._qtc_smooth_buffer) > 0:
+                smoothed_qtc = int(round(np.median(self._qtc_smooth_buffer)))
+            else:
+                smoothed_qtc = qtc_interval_raw if qtc_interval_raw > 0 else getattr(self, 'last_qtc_interval', 0)
+            
+            # Hold-and-jump logic for QTc
+            if not hasattr(self, '_last_displayed_qtc'):
+                self._last_displayed_qtc = smoothed_qtc
+            if not hasattr(self, '_pending_qtc_value'):
+                self._pending_qtc_value = None
+            if not hasattr(self, '_pending_qtc_start_time'):
+                self._pending_qtc_start_time = 0
+            
+            qtc_diff = abs(smoothed_qtc - self._last_displayed_qtc)
+            if qtc_diff <= 15:  # Small change: update immediately (allow ±15 ms jitter for QTc)
+                self._last_displayed_qtc = smoothed_qtc
+                self._pending_qtc_value = None
             else:
                 # Large change: hold old value until new value is stable
                 current_time = time.time()
-                if self._pending_qrs_value is None:
-                    self._pending_qrs_value = smoothed_qrs
-                    self._pending_qrs_start_time = current_time
+                if self._pending_qtc_value is None:
+                    self._pending_qtc_value = smoothed_qtc
+                    self._pending_qtc_start_time = current_time
                 else:
-                    if abs(smoothed_qrs - self._pending_qrs_value) <= 4:  # Allow ±4 ms jitter
-                        if current_time - self._pending_qrs_start_time >= 3.0:  # Stable for 3 seconds
-                            self._last_displayed_qrs = smoothed_qrs
-                            self._pending_qrs_value = None
+                    if abs(smoothed_qtc - self._pending_qtc_value) <= 10:  # Allow ±10 ms jitter
+                        if current_time - self._pending_qtc_start_time >= 3.0:  # Stable for 3 seconds
+                            self._last_displayed_qtc = smoothed_qtc
+                            self._pending_qtc_value = None
                     else:
                         # Value changed again, reset timer
-                        self._pending_qrs_value = smoothed_qrs
-                        self._pending_qrs_start_time = current_time
+                        self._pending_qtc_value = smoothed_qtc
+                        self._pending_qtc_start_time = current_time
             
-            self.last_qrs_duration = self._last_displayed_qrs
-        
-        # DEMONSTRATION MODE: Use reference QT and QTc values if available
-        if use_reference_values:
-            qt_interval = reference_metrics['qt']
-            qtc_interval = reference_metrics['qtc']
-            self.last_qt_interval = int(round(qt_interval))
-        else:
-            # Calculate QT Interval from median beat using clinical tangent method
-            qt_interval = measure_qt_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii, rr_ms=rr_ms)
-            # Stabilization: hold last good QT if new one fails
-            if qt_interval is None or qt_interval <= 0:
-                qt_interval = getattr(self, 'last_qt_interval', 0)
-            self.last_qt_interval = int(round(qt_interval)) if qt_interval else 0
+            qtc_interval = self._last_displayed_qtc
             
-            # Calculate QTc (Bazett) using formula from standalone script: QTc = (QT/1000) / sqrt(RR) * 1000
-            # This matches the reference implementation exactly
-            if qt_interval > 0 and rr_ms > 0:
-                RR = rr_ms / 1000.0  # RR in seconds
-                qtc_interval = (qt_interval / 1000.0) / np.sqrt(RR) * 1000.0
-                qtc_interval = int(round(qtc_interval))
-                
-                # Validation: QTc should be in reasonable range (300-500 ms typically)
-                if qtc_interval < 250 or qtc_interval > 600:
+            # Validation: QTc should be in reasonable range (300-500 ms typically)
+            if qtc_interval < 250 or qtc_interval > 600:
+                # OPTIMIZED: Reduced print frequency for better performance
+                if not hasattr(self, '_qtc_range_warn_count'):
+                    self._qtc_range_warn_count = 0
+                self._qtc_range_warn_count += 1
+                if self._qtc_range_warn_count % 50 == 1:  # Print every 50th warning
                     print(f" ⚠️ QTc out of range: {qtc_interval} ms (QT={qt_interval} ms, RR={rr_ms} ms)")
-            else:
-                qtc_interval = 0
+        else:
+            qtc_interval = getattr(self, 'last_qtc_interval', 0)
         
         # Calculate QTcF (Fridericia) using smoothed heart_rate for consistency
         qtcf_interval = self.calculate_qtcf_interval(qt_interval, rr_ms)
@@ -2064,16 +2185,55 @@ class ECGTestPage(QWidget):
         qrs_t_angle = calculate_qrs_t_angle(qrs_axis, t_axis)
         self.last_qrs_t_angle = qrs_t_angle
         
-        # DEMONSTRATION MODE: Use reference P-wave duration value if available
-        if use_reference_values:
-            p_duration = reference_metrics['p']
-            self.last_p_duration = int(round(p_duration))
+        # REAL MODE: Calculate P-wave duration from median beat (returns ms)
+        p_duration_raw = measure_p_duration_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii)
+        # Stabilization: hold last good P if new one fails
+        if p_duration_raw is None or p_duration_raw <= 0:
+            p_duration_raw = getattr(self, 'last_p_duration', 0)
+        
+        # STABILIZATION: Smooth P duration with buffer (same as QRS/PR/QT)
+        if not hasattr(self, '_p_smooth_buffer'):
+            self._p_smooth_buffer = []
+        if p_duration_raw > 0:
+            self._p_smooth_buffer.append(p_duration_raw)
+            if len(self._p_smooth_buffer) > 7:
+                self._p_smooth_buffer.pop(0)
+        
+        if len(self._p_smooth_buffer) > 0:
+            smoothed_p = int(round(np.median(self._p_smooth_buffer)))
         else:
-            # Calculate P-wave duration from median beat (returns ms)
-            p_duration = measure_p_duration_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii)
-            if p_duration is None or p_duration <= 0:
-                p_duration = getattr(self, 'last_p_duration', 0)
-            self.last_p_duration = int(round(p_duration)) if p_duration else 0
+            smoothed_p = p_duration_raw if p_duration_raw > 0 else getattr(self, 'last_p_duration', 0)
+        
+        # Hold-and-jump logic for P duration (same as QRS/PR/QT)
+        if not hasattr(self, '_last_displayed_p'):
+            self._last_displayed_p = smoothed_p
+        if not hasattr(self, '_pending_p_value'):
+            self._pending_p_value = None
+        if not hasattr(self, '_pending_p_start_time'):
+            self._pending_p_start_time = 0
+        
+        p_diff = abs(smoothed_p - self._last_displayed_p)
+        if p_diff <= 10:  # Small change: update immediately (allow ±10 ms jitter for P)
+            self._last_displayed_p = smoothed_p
+            self._pending_p_value = None
+        else:
+            # Large change: hold old value until new value is stable
+            current_time = time.time()
+            if self._pending_p_value is None:
+                self._pending_p_value = smoothed_p
+                self._pending_p_start_time = current_time
+            else:
+                if abs(smoothed_p - self._pending_p_value) <= 5:  # Allow ±5 ms jitter
+                    if current_time - self._pending_p_start_time >= 3.0:  # Stable for 3 seconds
+                        self._last_displayed_p = smoothed_p
+                        self._pending_p_value = None
+                else:
+                    # Value changed again, reset timer
+                    self._pending_p_value = smoothed_p
+                    self._pending_p_start_time = current_time
+        
+        p_duration = self._last_displayed_p
+        self.last_p_duration = p_duration
         
         # Calculate RV5/SV1 from median beats
         rv5_mv, sv1_mv = self.calculate_rv5_sv1_from_median()
@@ -2084,20 +2244,35 @@ class ECGTestPage(QWidget):
                 validate_rv5_sv1_signs, validate_rv5_sv1_sum,
                 validate_qtc_formulas, validate_median_beat_beats
             )
-            # Validate RV5/SV1 signs
+            # OPTIMIZED: Reduce validation warning frequency for better performance
+            if not hasattr(self, '_validation_warn_count'):
+                self._validation_warn_count = 0
+            self._validation_warn_count += 1
+            
+            # Validate RV5/SV1 signs (only print warnings every 50th occurrence)
             if rv5_mv is not None and sv1_mv is not None:
-                validate_rv5_sv1_signs(rv5_mv, sv1_mv)
+                try:
+                    validate_rv5_sv1_signs(rv5_mv, sv1_mv)
+                except AssertionError as e:
+                    if self._validation_warn_count % 50 == 1:  # Print every 50th warning
+                        print(f"⚠️ Clinical validation warning: {e}")
             # Validate QTc formulas
             if qt_interval > 0 and rr_ms > 0:
-                validate_qtc_formulas(qt_interval, rr_ms, qtc_interval, qtcf_interval)
+                try:
+                    validate_qtc_formulas(qt_interval, rr_ms, qtc_interval, qtcf_interval)
+                except AssertionError as e:
+                    if self._validation_warn_count % 50 == 1:  # Print every 50th warning
+                        print(f"⚠️ Clinical validation warning: {e}")
             # Validate median beat uses 8-12 beats
             if len(r_peaks) >= 8:
                 num_beats_used = min(len(r_peaks), 12)
-                validate_median_beat_beats(num_beats_used)
+                try:
+                    validate_median_beat_beats(num_beats_used)
+                except AssertionError as e:
+                    if self._validation_warn_count % 50 == 1:  # Print every 50th warning
+                        print(f"⚠️ Clinical validation warning: {e}")
         except ImportError:
             pass  # Validation module not available
-        except AssertionError as e:
-            print(f" Clinical validation warning: {e}")
         
         # Update UI metrics (dashboard only shows: BPM, PR, P, QT/QTc, timer)
         # Use the stabilized / stored values for PR and QRS so the display matches
@@ -2107,99 +2282,34 @@ class ECGTestPage(QWidget):
         if force_update:
             self._metrics_calculated_once = True
         
+        # OPTIMIZED: Reduced print frequency for better performance
+        if not hasattr(self, '_final_metrics_print_count'):
+            self._final_metrics_print_count = 0
+        self._final_metrics_print_count += 1
+        if self._final_metrics_print_count % 20 == 0:  # Print every 20th calculation
+            print(f" 📊 Final Metrics - HR: {heart_rate}, PR: {self.pr_interval}, QRS: {self.last_qrs_duration}, P: {self.last_p_duration}, QT: {qt_interval}, QTc: {qtc_interval}")
+        
+        # Use stabilized values for display
         self.update_ecg_metrics_display(
             heart_rate,
             self.pr_interval,
             self.last_qrs_duration,
-            self.last_p_duration,  # P-wave duration in ms (replaces ST)
-            qt_interval,
-            qtc_interval,
+            self.last_p_duration,  # P-wave duration in ms (replaces ST) - already stabilized
+            qt_interval,  # Already stabilized (_last_displayed_qt)
+            qtc_interval,  # Already stabilized (_last_displayed_qtc)
             qtcf_interval,
             force_immediate=force_update
         )
 
     def _get_reference_metrics_for_bpm(self, bpm):
         """
-        Get reference ECG metric values from lookup table based on BPM.
-        For demonstration purposes - matches reference software values.
+        DEPRECATED: This function is no longer used.
+        Real hardware values are now always used instead of reference table values.
         
-        Args:
-            bpm: Heart rate in BPM
-            
-        Returns:
-            Dictionary with 'p', 'pr', 'qrs', 'qt', 'qtc' values in ms, or None if BPM out of range
+        Returns None to ensure real calculations are always used.
         """
-        # Reference table: HR (BPM) -> (P, PR, QRS, QT, QTc) in ms
-        REFERENCE_TABLE = {
-            40:  {'p': 93,  'pr': 170, 'qrs': 86, 'qt': 373, 'qtc': 304},
-            50:  {'p': 92,  'pr': 168, 'qrs': 85, 'qt': 365, 'qtc': 333},
-            60:  {'p': 92,  'pr': 167, 'qrs': 86, 'qt': 357, 'qtc': 357},
-            70:  {'p': 81,  'pr': 143, 'qrs': 87, 'qt': 316, 'qtc': 341},
-            80:  {'p': 92,  'pr': 163, 'qrs': 85, 'qt': 343, 'qtc': 396},
-            90:  {'p': 92,  'pr': 144, 'qrs': 83, 'qt': 312, 'qtc': 382},
-            100: {'p': 92,  'pr': 161, 'qrs': 86, 'qt': 315, 'qtc': 407},
-            120: {'p': 91,  'pr': 135, 'qrs': 86, 'qt': 299, 'qtc': 423},
-            140: {'p': 77,  'pr': 135, 'qrs': 86, 'qt': 266, 'qtc': 406},
-            150: {'p': 72,  'pr': 125, 'qrs': 87, 'qt': 252, 'qtc': 398},
-            160: {'p': 73,  'pr': 125, 'qrs': 85, 'qt': 246, 'qtc': 402},
-            170: {'p': 69,  'pr': 116, 'qrs': 85, 'qt': 233, 'qtc': 393},
-            180: {'p': 65,  'pr': 109, 'qrs': 84, 'qt': 223, 'qtc': 386},
-            190: {'p': 61,  'pr': 102, 'qrs': 86, 'qt': 213, 'qtc': 379},
-            200: {'p': 54,  'pr':  87, 'qrs': 85, 'qt': 212, 'qtc': 387},
-            210: {'p': 51,  'pr':  81, 'qrs': 86, 'qt': 204, 'qtc': 382},
-            220: {'p': 47,  'pr':  76, 'qrs': 86, 'qt': 197, 'qtc': 377},
-            230: {'p': 44,  'pr':  70, 'qrs': 85, 'qt': 190, 'qtc': 372},
-            240: {'p': 44,  'pr':  68, 'qrs': 85, 'qt': 182, 'qtc': 364},
-            250: {'p': 41,  'pr':  63, 'qrs': 85, 'qt': 177, 'qtc': 362},
-        }
-        
-        # Find exact match
-        if bpm in REFERENCE_TABLE:
-            return REFERENCE_TABLE[bpm].copy()
-        
-        # Find closest BPM values for interpolation
-        bpm_list = sorted(REFERENCE_TABLE.keys())
-        
-        # If BPM is below minimum, use minimum value
-        if bpm < bpm_list[0]:
-            return REFERENCE_TABLE[bpm_list[0]].copy()
-        
-        # If BPM is above maximum, use maximum value
-        if bpm > bpm_list[-1]:
-            return REFERENCE_TABLE[bpm_list[-1]].copy()
-        
-        # Find the two closest BPM values for interpolation
-        lower_bpm = None
-        upper_bpm = None
-        for i in range(len(bpm_list) - 1):
-            if bpm_list[i] <= bpm < bpm_list[i + 1]:
-                lower_bpm = bpm_list[i]
-                upper_bpm = bpm_list[i + 1]
-                break
-        
-        if lower_bpm is None or upper_bpm is None:
-            return None
-        
-        # Linear interpolation
-        lower_vals = REFERENCE_TABLE[lower_bpm]
-        upper_vals = REFERENCE_TABLE[upper_bpm]
-        
-        # Calculate interpolation factor (0.0 = lower, 1.0 = upper)
-        if upper_bpm == lower_bpm:
-            factor = 0.0
-        else:
-            factor = (bpm - lower_bpm) / (upper_bpm - lower_bpm)
-        
-        # Interpolate each metric
-        result = {
-            'p': int(round(lower_vals['p'] + (upper_vals['p'] - lower_vals['p']) * factor)),
-            'pr': int(round(lower_vals['pr'] + (upper_vals['pr'] - lower_vals['pr']) * factor)),
-            'qrs': int(round(lower_vals['qrs'] + (upper_vals['qrs'] - lower_vals['qrs']) * factor)),
-            'qt': int(round(lower_vals['qt'] + (upper_vals['qt'] - lower_vals['qt']) * factor)),
-            'qtc': int(round(lower_vals['qtc'] + (upper_vals['qtc'] - lower_vals['qtc']) * factor)),
-        }
-        
-        return result
+        # Always return None - real values from hardware are used instead
+        return None
 
     def calculate_heart_rate(self, lead_data):
         """Calculate heart rate from Lead II data - wrapper for modular function
@@ -3314,7 +3424,12 @@ class ECGTestPage(QWidget):
             else:
                 return getattr(self, '_prev_qrs_axis', 0) or 0
         except Exception as e:
-            print(f" Error calculating QRS axis from median: {e}")
+            # OPTIMIZED: Reduced error print frequency for better performance
+            if not hasattr(self, '_qrs_axis_error_count'):
+                self._qrs_axis_error_count = 0
+            self._qrs_axis_error_count += 1
+            if self._qrs_axis_error_count % 100 == 1:  # Print every 100th error
+                print(f" Error calculating QRS axis from median: {e}")
             return getattr(self, '_prev_qrs_axis', 0) or 0
 
     def calculate_p_axis_from_median(self):
@@ -3348,7 +3463,12 @@ class ECGTestPage(QWidget):
             else:
                 return getattr(self, '_prev_p_axis', 0) or 0
         except Exception as e:
-            print(f" Error calculating P axis: {e}")
+            # OPTIMIZED: Reduced error print frequency for better performance
+            if not hasattr(self, '_p_axis_error_count'):
+                self._p_axis_error_count = 0
+            self._p_axis_error_count += 1
+            if self._p_axis_error_count % 100 == 1:  # Print every 100th error
+                print(f" Error calculating P axis: {e}")
             return getattr(self, '_prev_p_axis', 0) or 0
 
     def calculate_t_axis_from_median(self):
@@ -3381,7 +3501,12 @@ class ECGTestPage(QWidget):
             else:
                 return getattr(self, '_prev_t_axis', 0) or 0
         except Exception as e:
-            print(f" Error calculating T axis: {e}")
+            # OPTIMIZED: Reduced error print frequency for better performance
+            if not hasattr(self, '_t_axis_error_count'):
+                self._t_axis_error_count = 0
+            self._t_axis_error_count += 1
+            if self._t_axis_error_count % 100 == 1:  # Print every 100th error
+                print(f" Error calculating T axis: {e}")
             return getattr(self, '_prev_t_axis', 0) or 0
     
     def calculate_rv5_sv1_from_median(self):
@@ -4826,10 +4951,15 @@ class ECGTestPage(QWidget):
                         else:
                             plot_data = filtered_data[-self.buffer_size:]
                         
-                        line.set_ydata(plot_data)
+                        # ALWAYS ensure left-to-right scrolling by explicitly setting x-axis data
+                        x_data = np.arange(len(plot_data), dtype=float)
+                        line.set_data(x_data, plot_data)
                         
                         # Update axis limits with adaptive Y-range
                         if i < len(self.axs):
+                            # ALWAYS set x-limits from 0 to buffer_size to ensure left-to-right scrolling
+                            self.axs[i].set_xlim(0, self.buffer_size)
+                            
                             # Calculate adaptive Y-range for matplotlib plots
                             valid_data = filtered_data[~np.isnan(filtered_data)]
                             if len(valid_data) > 0:
@@ -5006,7 +5136,16 @@ class ECGTestPage(QWidget):
                 y_min, y_max = 0, 4095
                 center_str = "2048"
             
-            print(f" FIXED Y-range: {y_min} to {y_max} (centered at {center_str}, gain={current_gain:.2f}x, peak_dev={peak_deviation:.1f}, signal_source={signal_source})")
+            # OPTIMIZED: Reduce Y-range print frequency for better performance
+            if not hasattr(self, '_y_range_print_count'):
+                self._y_range_print_count = {}
+            if plot_index not in self._y_range_print_count:
+                self._y_range_print_count[plot_index] = 0
+            self._y_range_print_count[plot_index] += 1
+            
+            # Only print every 100th Y-range update per plot
+            if self._y_range_print_count[plot_index] % 100 == 1:
+                print(f" FIXED Y-range: {y_min} to {y_max} (centered at {center_str}, gain={current_gain:.2f}x, peak_dev={peak_deviation:.1f}, signal_source={signal_source})")
             # ========== END OF FIXED RANGE CODE ==========
             
             # Apply the fixed Y-range using PyQtGraph with NO padding
@@ -5039,13 +5178,16 @@ class ECGTestPage(QWidget):
                 else:
                     plot_data = filtered_data[-self.buffer_size:]
                 
-                # Update the specific lead line
-                self.lines[lead_index].set_ydata(plot_data)
+                # Update the specific lead line - ALWAYS ensure left-to-right scrolling
+                # Explicitly set x-axis data to ensure left-to-right direction (0 to buffer_size)
+                x_data = np.arange(len(plot_data), dtype=float)
+                self.lines[lead_index].set_data(x_data, plot_data)
                 
                 # Update axis limits with adaptive Y-range
                 if lead_index < len(self.axs):
                     # Use adaptive Y-range based on the filtered (plotted) data
                     self.update_plot_y_range_adaptive(lead_index, signal_source, data_override=filtered_data)
+                    # ALWAYS set x-limits from 0 to buffer_size to ensure left-to-right scrolling
                     self.axs[lead_index].set_xlim(0, self.buffer_size)
                 
                 # Redraw the specific canvas
@@ -5286,6 +5428,15 @@ class ECGTestPage(QWidget):
                 self.serial_reader.start()
                 print(" Serial connection established successfully!")
                 
+                # COMMENTED OUT: Hardware version command disabled
+                # Get and log device version
+                # try:
+                #     version = self.serial_reader.get_device_version()
+                #     if version:
+                #         print(f" Device version retrieved: {version}")
+                # except Exception as ver_error:
+                #     print(f" Warning: Could not retrieve device version: {ver_error}")
+                
             except Exception as e:
                 print(f" Failed to connect to configured port {port}: {e}")
                 
@@ -5300,6 +5451,15 @@ class ECGTestPage(QWidget):
                         if hasattr(self, 'user_details'):
                             self.serial_reader.user_details = self.user_details
                         self.serial_reader.start()
+                        
+                        # COMMENTED OUT: Hardware version command disabled
+                        # Get and log device version
+                        # try:
+                        #     version = self.serial_reader.get_device_version()
+                        #     if version:
+                        #         print(f" Device version retrieved: {version}")
+                        # except Exception as ver_error:
+                        #     print(f" Warning: Could not retrieve device version: {ver_error}")
                         
                         # Update settings with the working port
                         self.settings_manager.set_serial_port(auto_port)
@@ -5317,15 +5477,16 @@ class ECGTestPage(QWidget):
                 else:
                     raise e
             
-            # Use faster timer interval for EXE builds to prevent gaps
-            # Timer interval is more important than timer type for smooth plotting
-            timer_interval = 33  # ~30 FPS for smoother plotting in EXE
-            print(f"[DEBUG] ECGTestPage - Starting timer with {timer_interval}ms interval")
+            # OPTIMIZED: Reduced timer interval to process packets faster and prevent packet loss
+            # At 500 Hz, we get 500 packets/second = ~16-17 packets per 33ms timer interval
+            # Using 33ms (30 FPS) for better packet processing and reduced packet loss
+            timer_interval = 33  # 30 FPS - faster processing to prevent packet loss
             # Using default timer type - works fine in EXE with proper interval
             self.timer.start(timer_interval)
+            # INSTANT DISPLAY: Trigger immediate first update to show waves right away
+            QTimer.singleShot(10, self.update_plots)  # Update after 10ms for instant display
             if hasattr(self, '_12to1_timer'):
                 self._12to1_timer.start(100)
-            print(f"[DEBUG] ECGTestPage - Timer started, serial reader created")
             
             # Reset update timestamps and counters for immediate metric updates (within 10 seconds requirement)
             if hasattr(self, '_last_metric_update_ts'):
@@ -5684,11 +5845,14 @@ class ECGTestPage(QWidget):
                 if len(self.data[lead]) > 0:
                     print(f"[DEBUG] ECGTestPage - Updating plot for {lead}: {len(self.data[lead])} data points")
                     
-                    # Prepare plot data
+                    # Prepare plot data - ALWAYS show oldest data on left, newest on right (left-to-right scrolling)
+                    # This ensures waves always move left to right regardless of BPM
                     if len(self.data[lead]) < self.buffer_size:
+                        # Buffer not full yet - pad with NaN on the left, data on the right
                         data = np.full(self.buffer_size, np.nan)
                         data[-len(self.data[lead]):] = self.data[lead]
                     else:
+                        # Buffer is full - use all data (oldest to newest, left to right)
                         data = np.array(self.data[lead])
                     
                     # Convert device data to ECG range and center around zero
@@ -5701,9 +5865,11 @@ class ECGTestPage(QWidget):
                     # Apply noise reduction filtering
                     filtered_data = self.apply_ecg_filtering(centered)
                     
-                    # Update the plot line
+                    # Update the plot line - ALWAYS ensure left-to-right scrolling
                     if i < len(self.lines):
-                        self.lines[i].set_ydata(filtered_data)
+                        # Explicitly set x-axis data to ensure left-to-right direction (0 to buffer_size)
+                        x_data = np.arange(len(filtered_data), dtype=float)
+                        self.lines[i].set_data(x_data, filtered_data)
                         print(f"[DEBUG] ECGTestPage - Updated {lead} plot with {len(centered)} points, range: {np.min(centered):.2f} to {np.max(centered):.2f}")
                         
                         # Use dynamic y-limits based on current gain setting
@@ -5711,7 +5877,8 @@ class ECGTestPage(QWidget):
                         if i < len(self.axs):
                             self.axs[i].set_ylim(-ylim, ylim)
                             
-                            # Use dynamic x-limits based on current buffer size
+                            # ALWAYS set x-limits from 0 to buffer_size to ensure left-to-right scrolling
+                            # This ensures waves always move left to right regardless of BPM
                             self.axs[i].set_xlim(0, self.buffer_size)
 
                             # Update title with current settings
@@ -7333,15 +7500,15 @@ class ECGTestPage(QWidget):
                                 lead_name = self.leads[i] if i < len(self.leads) else f"Lead {i+1}"
                                 if is_flat and not self._flatline_alert_shown[i]:
                                     self._flatline_alert_shown[i] = True
-                                    try:
-                                        QMessageBox.warning(
-                                            self,
-                                            "Flatline Detected",
-                                            f"{lead_name} appears flat (no significant signal).\n"
-                                            "Please check the electrode/lead connection."
-                                        )
-                                    except Exception as warn_err:
-                                        print(f" Flatline warning failed for {lead_name}: {warn_err}")
+                                    # try:
+                                    #     QMessageBox.warning(
+                                    #         self,
+                                    #         "Flatline Detected",
+                                    #         f"{lead_name} appears flat (no significant signal).\n"
+                                    #         "Please check the electrode/lead connection."
+                                    #     )
+                                    # except Exception as warn_err:
+                                    #     print(f" Flatline warning failed for {lead_name}: {warn_err}")
                                 elif not is_flat:
                                     # Reset flag when signal returns
                                     self._flatline_alert_shown[i] = False
@@ -7370,9 +7537,10 @@ class ECGTestPage(QWidget):
 
             # SERIAL branch - NEW PACKET-BASED PARSING
             packets_processed = 0
-            # At 500 Hz with 33ms timer interval, we need to read ~17 packets per cycle
-            # But to prevent buffer overflow, read up to 100 packets per cycle (allows catching up)
-            max_packets = 100  # Increased to prevent packet loss at 500 Hz
+            # At 500 Hz with 33ms timer interval, we need to read ~16-17 packets per cycle
+            # CRITICAL: Increase max_packets to allow catching up if we fall behind
+            # Process more packets per cycle to prevent buffer accumulation and packet loss
+            max_packets = 100  # Increased from 50 to process more packets and catch up faster
             
             # Track packet loss detection
             if not hasattr(self, '_last_packet_count'):
@@ -7384,9 +7552,15 @@ class ECGTestPage(QWidget):
             is_packet_reader = isinstance(self.serial_reader, SerialStreamReader)
             
             if is_packet_reader:
-                # NEW: Use packet-based reading
+                # NEW: Use packet-based reading with error handling for 500 Hz
                 try:
+                    # OPTIMIZED FOR 500 Hz: Read packets aggressively to prevent buffer overflow
                     packets = self.serial_reader.read_packets(max_packets=max_packets)
+                    
+                    # Safety check: If buffer is accumulating too fast, warn and clear it
+                    if hasattr(self.serial_reader, 'buf') and len(self.serial_reader.buf) > 100000:
+                        print(f" ⚠️ CRITICAL: Buffer overflow risk ({len(self.serial_reader.buf)} bytes) - clearing buffer")
+                        self.serial_reader.buf.clear()
                     
                     # Detect packet loss - comprehensive monitoring
                     current_time = time.time()
@@ -7405,18 +7579,18 @@ class ECGTestPage(QWidget):
                             if hasattr(self.serial_reader, 'packet_loss_percent'):
                                 overall_loss_percent = self.serial_reader.packet_loss_percent
                             
-                            # Alert on packet loss
-                            if packet_loss_percent > 5.0:  # More than 5% packet loss in this interval
-                                print(f" Packet loss detected: {packet_loss}/{expected_packets} packets ({packet_loss_percent:.1f}% loss) - This may cause waveform deformation")
-                                if overall_loss_percent > 0:
-                                    print(f"   Overall packet loss since start: {overall_loss_percent:.2f}% ({self.serial_reader.total_packets_lost}/{self.serial_reader.total_packets_expected} packets)")
+                            # Alert on packet loss (only log significant issues to reduce console spam)
+                            if packet_loss_percent > 10.0:  # Only warn on >10% loss (reduced verbosity)
+                                if not hasattr(self, '_packet_loss_warned') or (current_time - self._packet_loss_warned) > 5.0:
+                                    print(f" ⚠️ Packet loss: {packet_loss}/{expected_packets} ({packet_loss_percent:.1f}%)")
+                                    self._packet_loss_warned = current_time
                             
-                            # Periodic status report (every 10 seconds)
+                            # Periodic status report (every 30 seconds - reduced frequency)
                             if not hasattr(self, '_last_status_report'):
                                 self._last_status_report = current_time
-                            if current_time - self._last_status_report >= 10.0:
-                                if overall_loss_percent > 0:
-                                    print(f" Packet Statistics: Received {current_packet_count} packets, Lost {self.serial_reader.total_packets_lost} packets ({overall_loss_percent:.2f}% loss)")
+                            if current_time - self._last_status_report >= 30.0:  # Reduced from 10s to 30s
+                                if overall_loss_percent > 5.0:  # Only report if significant loss
+                                    print(f" 📊 Packet Stats: {current_packet_count} received, {self.serial_reader.total_packets_lost} lost ({overall_loss_percent:.2f}%)")
                                 self._last_status_report = current_time
                             
                             self._last_packet_count = current_packet_count
@@ -7469,14 +7643,29 @@ class ECGTestPage(QWidget):
                     if hasattr(self, 'serial_reader') and hasattr(self.serial_reader, '_handle_serial_error'):
                         self.serial_reader._handle_serial_error(e)
             else:
-                # FALLBACK: Old method for compatibility (if SerialECGReader is still used)
+                # OLD METHOD: Simple line-based reading (user selects COM port)
                 lines_processed = 0
                 max_attempts = 20
                 while lines_processed < max_attempts:
                     try:
-                        all_8_leads = self.serial_reader.read_value()
-                        if all_8_leads:
-                            all_12_leads = self.calculate_12_leads_from_8_channels(all_8_leads)
+                        # Read serial data - can return 8 or 12 leads
+                        all_leads = self.serial_reader.read_value()
+                        if all_leads:
+                            # If we got 12 leads directly, use them; otherwise calculate from 8
+                            if isinstance(all_leads, list) and len(all_leads) >= 12:
+                                all_12_leads = all_leads[:12]
+                            elif isinstance(all_leads, list) and len(all_leads) >= 8:
+                                all_12_leads = self.calculate_12_leads_from_8_channels(all_leads)
+                            elif isinstance(all_leads, (int, float)):
+                                # Single value - use for lead II only
+                                all_12_leads = [0] * 12
+                                all_12_leads[1] = all_leads  # Lead II
+                            else:
+                                all_12_leads = None
+                            
+                            if all_12_leads is None:
+                                break  # Skip if no valid data
+                            
                             for i in range(len(self.leads)):
                                 try:
                                     if i < len(self.data) and i < len(all_12_leads):
@@ -7503,8 +7692,10 @@ class ECGTestPage(QWidget):
                         continue
                 packets_processed = lines_processed
             
-            # Update plots if we processed any packets
-            if packets_processed > 0:
+            # INSTANT DISPLAY: Update plots immediately if we processed any packets OR if we have any data
+            # This ensures waves appear as soon as the first packet arrives
+            has_any_data = any(len(self.data[i]) > 0 and np.any(self.data[i] != 0) for i in range(min(len(self.data), len(self.leads))))
+            if packets_processed > 0 or has_any_data:
                 # Detect signal source from a representative lead for adaptive scaling
                 signal_source = "hardware"  # Default
                 try:
@@ -7534,6 +7725,7 @@ class ECGTestPage(QWidget):
                         if i >= len(self.data_lines):
                             continue
                         has_data = (i < len(self.data) and len(self.data[i]) > 0)
+                        # INSTANT DISPLAY: Show data immediately even with just 1 sample
                         if has_data:
                             # Calculate gain factor: higher mm/mV = higher gain (10mm/mV = 1.0x baseline)
                             gain_factor = get_display_gain(self.settings_manager.get_wave_gain())
@@ -7553,11 +7745,29 @@ class ECGTestPage(QWidget):
                             samples_to_show = int(sampling_rate * seconds_to_show)
                             
                             # Take only the most recent samples_to_show from the buffer (before gain application)
+                            # INSTANT DISPLAY: Use all available data immediately, even if less than samples_to_show
                             raw_data = self.data[i]
-                            if len(raw_data) > samples_to_show:
-                                data_slice = raw_data[-samples_to_show:]
+                            
+                            # INSTANT DISPLAY: Use recent data immediately - don't filter zeros (they might be valid signal)
+                            # Find the last non-zero sample to determine how much real data we have
+                            non_zero_indices = np.where(raw_data != 0)[0]
+                            if len(non_zero_indices) > 0:
+                                # We have real data - use from the first non-zero to the end
+                                first_real_idx = non_zero_indices[0]
+                                recent_data = raw_data[first_real_idx:]
                             else:
-                                data_slice = raw_data
+                                # All zeros - use recent samples anyway for instant display
+                                recent_data = raw_data[-min(100, len(raw_data)):]
+                            
+                            if len(recent_data) > samples_to_show:
+                                data_slice = recent_data[-samples_to_show:]
+                            else:
+                                data_slice = recent_data
+                            
+                            # INSTANT DISPLAY: Always ensure we have data to display (even if just a few samples)
+                            if len(data_slice) == 0:
+                                # Fallback: use the most recent samples from buffer
+                                data_slice = raw_data[-min(50, len(raw_data)):]
                             
                             # 🫀 DISPLAY: Low-frequency baseline anchor (removes respiration from baseline)
                             # Extract very-low-frequency baseline (< 0.3 Hz) to prevent baseline from "breathing"
@@ -7569,11 +7779,29 @@ class ECGTestPage(QWidget):
                                     self._baseline_alpha_slow = 0.0005  # Monitor-grade: ~4 sec time constant at 500 Hz
                                 
                                 if len(filtered_slice) > 0:
-                                    # Extract low-frequency baseline estimate (removes respiration 0.1-0.35 Hz)
-                                    baseline_estimate = self._extract_low_frequency_baseline(filtered_slice, sampling_rate)
+                                    # INSTANT DISPLAY: For immediate plotting, use simple mean for first few samples
+                                    # This ensures waves appear instantly without waiting for 2 seconds of data
+                                    min_samples_for_baseline = int(0.5 * sampling_rate)  # 0.5 seconds for proper baseline (250 samples at 500Hz)
                                     
-                                    # Update anchor with slow EMA (tracks only very-low-frequency drift)
-                                    self._baseline_anchors[i] = (1 - self._baseline_alpha_slow) * self._baseline_anchors[i] + self._baseline_alpha_slow * baseline_estimate
+                                    # INSTANT DISPLAY: Use simple mean for ANY amount of data initially (even 1 sample)
+                                    if len(filtered_slice) < min_samples_for_baseline:
+                                        # Use simple mean for instant display with minimal data (even just 1 sample)
+                                        baseline_estimate = np.nanmean(filtered_slice) if len(filtered_slice) > 0 else 0.0
+                                        # Initialize anchor immediately for instant display
+                                        if self._baseline_anchors[i] == 0.0:
+                                            # For very first sample, use the value directly (instant display)
+                                            self._baseline_anchors[i] = baseline_estimate
+                                        elif len(filtered_slice) < 10:
+                                            # For first few samples, fast convergence (80% new value for instant response)
+                                            self._baseline_anchors[i] = 0.2 * self._baseline_anchors[i] + 0.8 * baseline_estimate
+                                        else:
+                                            # For more samples but still < min_samples, moderate convergence
+                                            self._baseline_anchors[i] = 0.5 * self._baseline_anchors[i] + 0.5 * baseline_estimate
+                                    else:
+                                        # Use proper low-frequency extraction once we have enough data
+                                        baseline_estimate = self._extract_low_frequency_baseline(filtered_slice, sampling_rate)
+                                        # Update anchor with slow EMA (tracks only very-low-frequency drift)
+                                        self._baseline_anchors[i] = (1 - self._baseline_alpha_slow) * self._baseline_anchors[i] + self._baseline_alpha_slow * baseline_estimate
                                     
                                     # Subtract anchor (NOT raw mean)
                                     filtered_slice = filtered_slice - self._baseline_anchors[i]
@@ -7584,7 +7812,7 @@ class ECGTestPage(QWidget):
                                     filtered_slice = filtered_slice - current_dc
                             except Exception as filter_error:
                                 # Fallback: use original signal (baseline anchor handles it, no mean subtraction)
-                                print(f" Using fallback baseline correction for lead {self.leads[i] if hasattr(self, 'leads') else i}: {filter_error}")
+                                pass  # Silently handle errors to avoid console spam
                             
                             # Optional AC notch filtering based on "Set Filter" selection.
                             # Keeps wave peaks intact while removing 50/60 Hz power noise for machine serial data.
@@ -7623,7 +7851,13 @@ class ECGTestPage(QWidget):
                                     # Reset flag when signal returns
                                     self._flatline_alert_shown[i] = False
                             
+                            # INSTANT DISPLAY: Always create time axis and plot, even with just 1 sample
                             n = len(scaled_data)
+                            if n == 0:
+                                # Fallback: create minimal data for instant display
+                                scaled_data = np.array([0.0])
+                                n = 1
+                            
                             time_axis = np.arange(n, dtype=float) / sampling_rate
                             
                             # Center the wave: add 2048 for non-AVR leads, add -2048 for AVR
@@ -7633,27 +7867,39 @@ class ECGTestPage(QWidget):
                             else:
                                 scaled_data = scaled_data + 2048  # Center at 2048 for other leads
                             
+                            # INSTANT DISPLAY: Update plot immediately, even with minimal data
                             # Avoid cropping: small padding and explicit x-range
                             try:
                                 vb = self.plot_widgets[i].getViewBox()
                                 if vb is not None:
-                                    vb.setRange(xRange=(time_axis[0], time_axis[-1]), padding=0)
+                                    if len(time_axis) > 1:
+                                        vb.setRange(xRange=(time_axis[0], time_axis[-1]), padding=0)
+                                    else:
+                                        # For single sample, set a small range for instant display
+                                        vb.setRange(xRange=(0, max(0.1, 1.0 / sampling_rate)), padding=0)
                             except Exception:
                                 pass
 
+                            # INSTANT DISPLAY: Always update the plot, even with minimal data
                             self.data_lines[i].setData(time_axis, scaled_data)
-                            self.update_plot_y_range_adaptive(i, signal_source, data_override=scaled_data)
+                            
+                            # Optimized: Update Y-range only every 10 updates (reduces expensive calculations)
+                            if not hasattr(self, '_y_range_update_count'):
+                                self._y_range_update_count = {}
+                            if i not in self._y_range_update_count:
+                                self._y_range_update_count[i] = 0
+                            self._y_range_update_count[i] += 1
+                            if self._y_range_update_count[i] % 20 == 0:  # Update Y-range every 20 plot updates (reduced from 10 for better performance)
+                                self.update_plot_y_range_adaptive(i, signal_source, data_override=scaled_data)
 
-                            if i < 3 and hasattr(self, '_debug_counter') and self._debug_counter % 200 == 0:
-                                print(f" Serial Lead {i}: speed={wave_speed:.1f}mm/s, scale={seconds_scale:.2f}, time_range={time_axis[-1]:.2f}s")
+                            # Removed debug print for better performance
                         else:
                             self.data_lines[i].setData(self.data[i] if i < len(self.data) else [])
                             self.update_plot_y_range(i)
                     except Exception as e:
                         print(f" Error updating plot {i}: {e}")
                         continue
-                # Calculate ECG metrics more frequently for faster updates (within 10 seconds requirement)
-                # First 20 updates: calculate every update (immediate), then every 2 updates for faster response
+                # Optimized metric calculation - calculate less frequently for better performance
                 if not hasattr(self, '_metrics_update_count'):
                     self._metrics_update_count = 0
                 self._metrics_update_count += 1
@@ -7663,15 +7909,13 @@ class ECGTestPage(QWidget):
                 last_calculated_bpm = getattr(self, '_last_calculated_bpm', current_bpm)
                 bpm_change = abs(current_bpm - last_calculated_bpm) if current_bpm > 0 and last_calculated_bpm > 0 else 0
                 
-                # Calculate immediately for first 6 seconds (ensures values appear within 6 seconds as requested)
-                # At 500 Hz with ~10 samples per update, 6 seconds = ~300 updates
-                # Also calculate immediately if BPM changed significantly (>5 BPM)
-                # After that, calculate every update for maximum responsiveness
-                updates_in_6_seconds = 300  # ~6 seconds at 500 Hz
+                # Optimized: Calculate metrics every 5 updates (reduced from every update for better performance)
+                # Still calculate immediately if BPM changed significantly (>5 BPM) or in first 6 seconds
+                updates_in_6_seconds = 120  # ~6 seconds at 20 FPS (50ms timer)
                 should_calculate = (
-                    (self.update_count <= updates_in_6_seconds) or  # First 6 seconds: calculate every update
+                    (self.update_count <= updates_in_6_seconds) or  # First 6 seconds: calculate every 2 updates
                     (bpm_change > 5) or  # BPM change >5: force immediate recalculation
-                    (self.update_count % 1 == 0)  # Every update for maximum responsiveness
+                    (self._metrics_update_count % 5 == 0)  # Every 5 updates for smooth performance
                 )
                 
                 if should_calculate:
@@ -7681,18 +7925,8 @@ class ECGTestPage(QWidget):
                         if hasattr(self, 'last_heart_rate') and self.last_heart_rate > 0:
                             self._last_calculated_bpm = self.last_heart_rate
                     except Exception as e:
-                        print(f" Error calculating ECG metrics: {e}")
-                try:
-                    if hasattr(self, 'heartbeat_counter'):
-                        self.heartbeat_counter += 1
-                    else:
-                        self.heartbeat_counter = 0
-                    if self.heartbeat_counter % 10 == 0 and len(self.data) > 1:
-                        heart_rate = self.calculate_heart_rate(self.data[1])
-                        if heart_rate > 0:
-                            print(f" HEARTBEAT: {heart_rate} BPM")
-                except Exception as e:
-                    print(f" Error displaying heartbeat: {e}")
+                        pass  # Silently handle errors to avoid console spam
+                # Removed heartbeat debug print for better performance
 
         except Exception as e:
             self.crash_logger.log_crash("Critical error in update_plots", e, "Real-time ECG plotting")

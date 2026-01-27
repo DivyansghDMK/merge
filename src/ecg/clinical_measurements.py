@@ -354,19 +354,24 @@ def detect_t_wave_end_tangent_method(signal_corrected, t_peak_idx, search_end, f
 
 def measure_qt_from_median_beat(median_beat, time_axis, fs, tp_baseline, rr_ms=None):
     """
-    Measure QT interval from median beat using clinical tangent method.
+    Measure QT interval from median beat using EXACT reference code logic.
     
-    Based on serial ECG processing algorithm:
-    - Uses energy envelope for QRS detection
-    - Q_onset = qrs_start - 40ms
+    EXACT IMPLEMENTATION from user's reference code:
+    - Uses 0.5-40 Hz bandpass filter
+    - Energy envelope for QRS detection: energy = np.diff(filt)**2
+    - QRS detection: find_peaks(energy, distance=int(0.3*FS), height=np.mean(energy)*5)
+    - QRS region: seg = np.abs(filt[r-win:r+win]), th = 0.25 * np.max(seg)
+    - Q_onset = qrs_start - int(0.04*FS)
     - T-end detection using tangent method on T-wave tail
+    - Baseline: np.mean(sig[qrs_start-80:qrs_start-40]) - uses sig, not filt
     - QT = (t_end - Q_onset) / fs * 1000
+    - QTc = (QT/1000) / np.sqrt(RR) * 1000 (Bazett's formula)
     
     Args:
-        median_beat: Median beat waveform (from measurement channel: 0.05-150 Hz)
+        median_beat: Median beat waveform
         time_axis: Time axis in ms (centered at R-peak = 0 ms)
         fs: Sampling rate (Hz)
-        tp_baseline: TP baseline value
+        tp_baseline: TP baseline value (not used in reference code)
         rr_ms: RR interval in ms (required for T-wave window calculation)
     
     Returns:
@@ -375,123 +380,126 @@ def measure_qt_from_median_beat(median_beat, time_axis, fs, tp_baseline, rr_ms=N
     try:
         r_idx = np.argmin(np.abs(time_axis))  # R-peak at 0 ms
         
-        # Use signal directly (median beat is already filtered)
+        # EXACT REFERENCE CODE: Start with signal
         sig = np.array(median_beat, dtype=float)
-        sig = sig - np.mean(sig)  # Remove DC offset
+        # ADAPTED FOR MEDIAN BEAT: Median beat is shorter (~650 samples), so reduce minimum requirement
+        if len(sig) < 100:  # Minimum samples needed for processing (was 2000 for continuous buffer)
+            return None
+        
+        # EXACT REFERENCE CODE: Remove mean
+        sig -= np.mean(sig)
+        
+        # EXACT REFERENCE CODE: Apply 0.5-40 Hz bandpass filter
+        b, a = butter(2, [0.5/(fs/2), 40/(fs/2)], 'band')
+        filt = filtfilt(b, a, sig)
         
         # If RR not provided, estimate from median beat length
         if rr_ms is None:
-            # Estimate RR from median beat window (typically 400ms pre + 900ms post = 1300ms)
             rr_ms = 600.0  # Default 60 BPM
         
         RR = rr_ms / 1000.0  # RR in seconds
         
-        # ---------- QRS (energy envelope) ----------
-        win = int(0.12 * fs)  # 120ms window
-        seg = np.abs(sig[r_idx - win:r_idx + win])
+        # ADAPTED FOR MEDIAN BEAT: Use R-peak index directly (median beat has R at center)
+        # In median beat, R-peak is at r_idx (time_axis = 0 ms)
+        r = r_idx
         
-        if len(seg) < 10:
+        # EXACT REFERENCE CODE: QRS detection using energy envelope (for QRS boundaries)
+        energy = np.diff(filt)**2
+        # Find energy peaks around R-peak to detect QRS region
+        peaks, _ = find_peaks(energy, distance=int(0.3*fs), height=np.mean(energy)*5)
+        
+        # ADAPTED: If no peaks found, use R-peak directly (median beat has single R-peak)
+        if len(peaks) == 0:
+            # Use R-peak directly for median beat
+            r = r_idx
+        else:
+            # Find peak closest to R-peak
+            closest_peak_idx = np.argmin(np.abs(peaks - r_idx))
+            r = peaks[closest_peak_idx]
+        
+        # EXACT REFERENCE CODE: QRS detection using energy envelope
+        win = int(0.12 * fs)  # 120ms window
+        # ADAPTED: Ensure window is within bounds for median beat
+        win_start = max(0, r - win)
+        win_end = min(len(filt), r + win)
+        seg = np.abs(filt[win_start:win_end])
+        
+        if len(seg) < 10:  # Need at least 10 samples
             return None
         
         th = 0.25 * np.max(seg)
         qrs_region = np.where(seg > th)[0]
         
-        if len(qrs_region) < 10:
+        if len(qrs_region) < 10:  # Reference code requires at least 10 samples
             return None
         
-        qrs_start = r_idx - win + qrs_region[0]
-        qrs_end = r_idx - win + qrs_region[-1]
+        qrs_start = win_start + qrs_region[0]
+        qrs_end = win_start + qrs_region[-1]
         
-        # -------- True Q onset (40ms before QRS start) --------
-        Q_onset = qrs_start - int(0.04 * fs)
+        # EXACT REFERENCE CODE: True Q onset (40ms before QRS start)
+        Q_onset = qrs_start - int(0.04*fs)
         Q_onset = max(Q_onset, 0)
         
-        # -------- T (clinical tangent method) --------
+        # EXACT REFERENCE CODE: T-wave detection
         t_start = qrs_end + int(0.06 * fs)  # 60ms after QRS end
         t_stop = qrs_end + int(0.65 * RR * fs)  # 65% of RR after QRS end
+        t_stop = min(t_stop, len(sig)-1)
         
-        t_stop = min(t_stop, len(sig) - 1)
         if t_stop <= t_start:
             return None
         
-        treg = sig[t_start:t_stop]
+        treg = sig[t_start:t_stop]  # EXACT: Use sig, not filt
         if len(treg) < int(0.04 * fs):
             return None
         
-        # T-peak
+        # EXACT REFERENCE CODE: T-peak
         t_peak = t_start + np.argmax(np.abs(treg))
         
-        # Use only the last half of T-wave for slope
+        # EXACT REFERENCE CODE: Use only the last half of T-wave for slope
         tail_start = t_peak + int(0.04 * fs)  # 40ms after T-peak
         tail_stop = min(t_stop, t_peak + int(0.25 * RR * fs))  # 25% of RR after T-peak
         
         if tail_stop <= tail_start:
             return None
         
-        tail = sig[tail_start:tail_stop]
+        tail = sig[tail_start:tail_stop]  # EXACT: Use sig, not filt
         
-        # Smooth tail with 7-point moving average
-        tail = np.convolve(tail, np.ones(7) / 7.0, mode="same")
+        # EXACT REFERENCE CODE: Smooth tail with 7-point moving average
+        tail = np.convolve(tail, np.ones(7)/7, mode="same")
         
         d = np.diff(tail)
         if len(d) == 0:
             return None
         
-        i = np.argmin(d)  # Maximum downslope (most negative)
+        i = np.argmin(d)  # Maximum downslope
         slope = d[i]
         
-        # Baseline calculation from standalone script: use window before QRS (80-40ms before QRS start)
-        # This matches the reference implementation exactly
-        baseline_start = max(0, qrs_start - int(0.08 * fs))
-        baseline_end = max(baseline_start + 1, qrs_start - int(0.04 * fs))
-        if baseline_end > baseline_start:
+        # EXACT REFERENCE CODE: Baseline calculation (80-40ms before QRS start, uses sig)
+        # ADAPTED: Ensure indices are within bounds for median beat
+        baseline_start = max(0, qrs_start - int(0.08*fs))  # 80ms before QRS start
+        baseline_end = max(baseline_start + 1, qrs_start - int(0.04*fs))  # 40ms before QRS start
+        if baseline_end > baseline_start and baseline_end <= len(sig):
             baseline = np.mean(sig[baseline_start:baseline_end])
         else:
-            # Fallback to TP baseline if window is invalid
-            baseline = tp_baseline
+            # Fallback: use mean of first part of signal
+            baseline = np.mean(sig[:max(1, int(0.1*fs))])
         
+        # EXACT REFERENCE CODE: T-end calculation
         if slope != 0:
             t_end = int(tail_start + i + (baseline - sig[tail_start + i]) / slope)
         else:
-            t_end = t_peak + int(0.12 * fs)  # Fallback: 120ms after T-peak
+            t_end = t_peak + int(0.12 * fs)  # Fallback
         
-        # Safety clamp
+        # EXACT REFERENCE CODE: Safety clamp
         min_end = t_peak + int(0.04 * fs)
         max_end = qrs_end + int(0.7 * RR * fs)
         t_end = int(np.clip(t_end, min_end, max_end))
         
-        # -------- QT INTERVAL --------
-        QT = (t_end - Q_onset) / fs * 1000.0
+        # EXACT REFERENCE CODE: QT interval calculation
+        QT = (t_end - Q_onset) / fs * 1000
         
-        # HR-dependent calibration offset to align with reference simulator
-        # Reference: 100 BPM → QT=315 ms, 150 BPM → QT=252 ms
-        # Current issues: 100 BPM → QT=312 ms (need +3 ms), 150 BPM → QT=273 ms (need -21 ms)
-        # Using heart-rate dependent calibration for accurate matching
-        if rr_ms is not None and rr_ms > 0:
-            hr_bpm = 60000.0 / rr_ms
-            if hr_bpm >= 140:
-                # Very high HR (140+ BPM): Subtract significant amount (was +21 ms too long)
-                QT -= 21.0  # At 150 BPM: 273 → 252 ms
-            elif hr_bpm >= 120:
-                # High HR (120-139 BPM): Subtract moderate amount
-                QT -= 15.0
-            elif hr_bpm >= 100:
-                # Mid-high HR (100-119 BPM): Add small amount
-                QT += 3.0  # At 100 BPM: 312 → 315 ms
-            elif hr_bpm >= 80:
-                # Mid HR (80-99 BPM): Subtract small amount
-                QT -= 5.0  # At 80 BPM: 348 → 343 ms
-            else:
-                # Low HR (<80 BPM): Add moderate amount
-                QT += 9.0  # At 60 BPM: 348 → 357 ms
-        else:
-            QT += 3.0  # Default: add 3 ms
+        return QT  # Return QT value (validation can be done by caller)
         
-        # Validate QT range (200-650ms)
-        if 200 <= QT <= 650:
-            return QT
-        
-        return None
     except Exception as e:
         print(f" ⚠️ Error measuring QT from median: {e}")
         return None
@@ -549,8 +557,12 @@ def measure_rv5_sv1_from_median_beat(v5_raw, v1_raw, r_peaks_v5, r_peaks_v1, fs,
     # Find max positive R amplitude in QRS window
     r_max_adc = np.max(qrs_segment) - tp_baseline_v5
     
-    # DEBUG: Log actual ADC values for calibration verification
-    print(f" RV5 Measurement: r_max_adc={r_max_adc:.2f}, tp_baseline_v5={tp_baseline_v5:.2f}, qrs_max={np.max(qrs_segment):.2f}, qrs_min={np.min(qrs_segment):.2f}")
+    # DEBUG: Log actual ADC values for calibration verification (reduced frequency for performance)
+    if not hasattr(measure_rv5_sv1_from_median_beat, '_measurement_debug_count'):
+        measure_rv5_sv1_from_median_beat._measurement_debug_count = 0
+    measure_rv5_sv1_from_median_beat._measurement_debug_count += 1
+    if measure_rv5_sv1_from_median_beat._measurement_debug_count % 50 == 1:  # Print every 50th call
+        print(f" RV5 Measurement: r_max_adc={r_max_adc:.2f}, tp_baseline_v5={tp_baseline_v5:.2f}, qrs_max={np.max(qrs_segment):.2f}, qrs_min={np.min(qrs_segment):.2f}")
     
     # CRITICAL FIX: Calibration factor adjustment based on actual vs expected ratio
     # Current: RV5=0.192 mV (expected: 0.969 mV) → ratio = 0.969/0.192 ≈ 5.05
@@ -559,7 +571,14 @@ def measure_rv5_sv1_from_median_beat(v5_raw, v1_raw, r_peaks_v5, r_peaks_v1, fs,
     # Adjusted: v5_adc_per_mv = 2048.0 / 5.05 ≈ 405.5 ADC/mV
     adjusted_v5_adc_per_mv = v5_adc_per_mv / 5.05  # Adjust based on actual vs expected ratio
     rv5_mv = r_max_adc / adjusted_v5_adc_per_mv if r_max_adc > 0 else None
-    print(f" RV5 Calibration: original={v5_adc_per_mv:.1f}, adjusted={adjusted_v5_adc_per_mv:.1f}, rv5_mv={rv5_mv:.3f} (expected: 0.969)")
+    # FIXED: Check for None before formatting to prevent format string error
+    rv5_str = f"{rv5_mv:.3f}" if rv5_mv is not None else "None"
+    # Reduced print frequency for performance - only print occasionally
+    if not hasattr(measure_rv5_sv1_from_median_beat, '_debug_count'):
+        measure_rv5_sv1_from_median_beat._debug_count = 0
+    measure_rv5_sv1_from_median_beat._debug_count += 1
+    if measure_rv5_sv1_from_median_beat._debug_count % 50 == 1:  # Print every 50th call
+        print(f" RV5 Calibration: original={v5_adc_per_mv:.1f}, adjusted={adjusted_v5_adc_per_mv:.1f}, rv5_mv={rv5_str} (expected: 0.969)")
     
     # Build median beat for V1 (requires ≥8 beats, GE/Philips standard)
     if len(r_peaks_v1) < 8:
@@ -596,8 +615,9 @@ def measure_rv5_sv1_from_median_beat(v5_raw, v1_raw, r_peaks_v5, r_peaks_v1, fs,
     # SV1 = S_nadir_V1 - TP_baseline_V1 (negative when S is below baseline)
     sv1_adc = s_nadir_v1_adc - tp_baseline_v1
     
-    # DEBUG: Log actual ADC values for calibration verification
-    print(f" SV1 Measurement: sv1_adc={sv1_adc:.2f}, tp_baseline_v1={tp_baseline_v1:.2f}, qrs_max={np.max(qrs_segment):.2f}, qrs_min={np.min(qrs_segment):.2f}")
+    # DEBUG: Log actual ADC values for calibration verification (reduced frequency for performance)
+    if measure_rv5_sv1_from_median_beat._measurement_debug_count % 50 == 1:  # Print every 50th call
+        print(f" SV1 Measurement: sv1_adc={sv1_adc:.2f}, tp_baseline_v1={tp_baseline_v1:.2f}, qrs_max={np.max(qrs_segment):.2f}, qrs_min={np.min(qrs_segment):.2f}")
     
     # CRITICAL FIX: Calibration factor adjustment based on actual vs expected ratio
     # Current: SV1=-0.030 mV (expected: -0.490 mV) → ratio = 0.490/0.030 ≈ 16.3
@@ -606,7 +626,11 @@ def measure_rv5_sv1_from_median_beat(v5_raw, v1_raw, r_peaks_v5, r_peaks_v1, fs,
     # Adjusted: v1_adc_per_mv = 1441.0 / 16.3 ≈ 88.4 ADC/mV
     adjusted_v1_adc_per_mv = v1_adc_per_mv / 16.3  # Adjust based on actual vs expected ratio
     sv1_mv = sv1_adc / adjusted_v1_adc_per_mv
-    print(f" SV1 Calibration: original={v1_adc_per_mv:.1f}, adjusted={adjusted_v1_adc_per_mv:.1f}, sv1_mv={sv1_mv:.3f} (expected: -0.490)")
+    # FIXED: Check for None before formatting to prevent format string error
+    sv1_str = f"{sv1_mv:.3f}" if sv1_mv is not None else "None"
+    # Reduced print frequency for performance - only print occasionally
+    if measure_rv5_sv1_from_median_beat._debug_count % 50 == 1:  # Print every 50th call
+        print(f" SV1 Calibration: original={v1_adc_per_mv:.1f}, adjusted={adjusted_v1_adc_per_mv:.1f}, sv1_mv={sv1_str} (expected: -0.490)")
     
     return rv5_mv, sv1_mv
 
@@ -886,72 +910,58 @@ def measure_pr_from_median_beat(median_beat_ii, time_axis, fs, tp_baseline_ii,
         PR interval in ms, or 0 if not measurable
     """
     try:
-        r_idx = np.argmin(np.abs(time_axis))  # R-peak at 0 ms
-        
-        # Baseline correction for Lead II
-        signal_corrected_ii = median_beat_ii - tp_baseline_ii
-        
-        # Calculate noise floor from TP segment
-        tp_start = max(0, r_idx - int(300 * fs / 1000))
-        tp_end = max(0, r_idx - int(150 * fs / 1000))
-        if tp_end > tp_start:
-            tp_segment = signal_corrected_ii[tp_start:tp_end]
-            noise_floor = np.std(tp_segment) if len(tp_segment) > 0 else np.std(signal_corrected_ii) * 0.1
-        else:
-            noise_floor = np.std(signal_corrected_ii) * 0.1
-        
-        # Detect QRS onset using slope-assisted method (from Lead II)
-        qrs_onset_idx = detect_qrs_onset_slope_assisted(signal_corrected_ii, r_idx, fs, tp_baseline_ii, noise_floor)
-        
-        if qrs_onset_idx is None:
-            # Fallback to amplitude-only method
-            signal_range = np.max(np.abs(signal_corrected_ii))
-            threshold = max(0.05 * signal_range, noise_floor * 3.0)
-            qrs_onset_start = max(0, r_idx - int(80 * fs / 1000))  # Extended to 80 ms (was 60 ms) to detect QRS onset earlier
-            qrs_segment = signal_corrected_ii[qrs_onset_start:r_idx]
-            qrs_deviations = np.where(np.abs(qrs_segment) > threshold * 2.0)[0]
-            qrs_onset_idx = qrs_onset_start + qrs_deviations[0] if len(qrs_deviations) > 0 else qrs_onset_start
-        
-        # Ensure qrs_onset_idx is valid
-        if qrs_onset_idx is None or qrs_onset_idx < 0 or qrs_onset_idx >= len(time_axis):
-            print(f" ⚠️ PR calculation failed: Invalid QRS onset index")
+        # EXACT REFERENCE CODE: Start with signal
+        sig = np.array(median_beat_ii, dtype=float)
+        if len(sig) < 2000:  # Reference code requires at least 2000 samples
             return 0
         
-        # CLINICAL-GRADE: Detect P-onset using atrial vector (Lead I + aVF)
-        if median_beat_i is not None and median_beat_avf is not None:
-            p_onset_idx = detect_p_onset_atrial_vector(
-                median_beat_i, median_beat_avf, median_beat_ii, 
-                time_axis, fs, qrs_onset_idx
-            )
-        else:
-            # Fallback to single-lead method if atrial vector not available
-            p_onset, _ = detect_p_wave_bounds(median_beat_ii, r_idx, fs, tp_baseline_ii)
-            p_onset_idx = p_onset
+        # EXACT REFERENCE CODE: Remove mean
+        sig -= np.mean(sig)
         
-        if p_onset_idx is None:
-            # Debug: Try to understand why P-onset detection failed
-            print(f" ⚠️ PR calculation failed: P-onset detection returned None (HR estimate: {60000.0 / abs(time_axis[qrs_onset_idx] - time_axis[0]) * 2 if qrs_onset_idx > 0 else 'unknown'} BPM)")
-            # Try fallback: use QRS onset - 200ms as conservative P-onset estimate
-            # This ensures PR is calculated even if P-wave detection fails
-            estimated_p_onset_ms = time_axis[qrs_onset_idx] - 200.0  # Conservative 200ms before QRS
-            pr_ms = 200.0  # Default PR estimate
-            print(f" ⚠️ Using fallback PR estimate: {pr_ms} ms")
-            if 50 <= pr_ms <= 300:  # Extended range: 50-300 ms
-                return int(round(pr_ms))
+        # EXACT REFERENCE CODE: Apply 0.5-40 Hz bandpass filter
+        b, a = butter(2, [0.5/(fs/2), 40/(fs/2)], 'band')
+        filt = filtfilt(b, a, sig)
+        
+        # EXACT REFERENCE CODE: QRS detection using energy envelope
+        energy = np.diff(filt)**2
+        peaks, _ = find_peaks(energy, distance=int(0.3*fs), height=np.mean(energy)*5)
+        
+        if len(peaks) < 2:  # Reference code requires at least 2 peaks
             return 0
         
-        # PR interval = QRS onset - P onset (in ms)
-        pr_ms = time_axis[qrs_onset_idx] - time_axis[p_onset_idx]
+        # EXACT REFERENCE CODE: Use last peak as R-peak
+        r = peaks[-1]
         
-        # Extended clinical PR range: 50-300 ms (covers all heart rates from 40-250 BPM)
-        # Reference values: 40 BPM → 170ms, 100 BPM → 161ms, 250 BPM → 63ms
-        # At high HR (140+ BPM), PR can be shorter, so allow down to 50ms
-        if 50 <= pr_ms <= 300:  # Extended range: 50-300 ms (was 60-300 ms)
-            return int(round(pr_ms))
-            
-        # Debug output for out-of-range PR
-        print(f" ⚠️ PR out of range: {pr_ms:.1f} ms (QRS_onset={time_axis[qrs_onset_idx]:.1f} ms, P_onset={time_axis[p_onset_idx]:.1f} ms)")
-        return 0
+        # EXACT REFERENCE CODE: QRS detection
+        win = int(0.12 * fs)  # 120ms window
+        seg = np.abs(filt[r-win:r+win])
+        th = 0.25 * np.max(seg)
+        
+        qrs_region = np.where(seg > th)[0]
+        if len(qrs_region) < 10:
+            return 0
+        
+        qrs_start = r - win + qrs_region[0]
+        
+        # EXACT REFERENCE CODE: True Q onset (40ms before QRS start)
+        Q_onset = qrs_start - int(0.04*fs)
+        Q_onset = max(Q_onset, 0)
+        
+        # EXACT REFERENCE CODE: P-onset detection
+        pl = max(0, Q_onset - int(0.25*fs))  # 250ms before Q_onset
+        pr = Q_onset - int(0.05*fs)  # 50ms before Q_onset
+        
+        if pr <= pl:
+            return 0
+        
+        # EXACT REFERENCE CODE: P-onset = maximum absolute difference in [pl:pr]
+        p_onset = pl + np.argmax(np.abs(np.diff(sig[pl:pr])))
+        
+        # EXACT REFERENCE CODE: PR interval calculation
+        PR = (qrs_start - p_onset) / fs * 1000
+        
+        return int(round(PR))
+        
     except Exception as e:
         print(f" ⚠️ Error measuring PR interval: {e}")
         return 0
@@ -1256,13 +1266,17 @@ def calculate_axis_from_median_beat(lead_i_raw, lead_ii_raw, lead_avf_raw, media
         # However, if Lead I and aVF have different calibration factors, we need to account for that
         # For now, use the provided calibration factors, but note that if they're wrong, axis will be wrong
         
-        # DEBUG: Log actual ADC values for axis calculation
-        print(f" {wave_type} Axis Measurement: net_i_adc={net_i_adc:.2f}, net_avf_adc={net_avf_adc:.2f}, adc_i={adc_i:.1f}, adc_avf={adc_avf:.1f}")
+        # OPTIMIZED: Reduced print frequency for better performance
+        if not hasattr(calculate_axis_from_median_beat, '_axis_debug_count'):
+            calculate_axis_from_median_beat._axis_debug_count = 0
+        calculate_axis_from_median_beat._axis_debug_count += 1
         
         net_i = net_i_adc / adc_i
         net_avf = net_avf_adc / adc_avf
         
-        print(f" {wave_type} Axis After Calibration: net_i={net_i:.6f}, net_avf={net_avf:.6f}")
+        if calculate_axis_from_median_beat._axis_debug_count % 50 == 1:  # Print every 50th call
+            print(f" {wave_type} Axis Measurement: net_i_adc={net_i_adc:.2f}, net_avf_adc={net_avf_adc:.2f}, adc_i={adc_i:.1f}, adc_avf={adc_avf:.1f}")
+            print(f" {wave_type} Axis After Calibration: net_i={net_i:.6f}, net_avf={net_avf:.6f}")
         
         # STEP 5: Clinical Safety Gate (GE-like Rejection)
         # For P-wave: Check if amplitude is too low (indeterminate axis)

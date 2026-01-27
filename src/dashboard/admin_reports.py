@@ -254,7 +254,7 @@ class AdminReportsDialog(QDialog):
         # Header actions for users
         header = QHBoxLayout()
         self.user_search_edit = QLineEdit()
-        self.user_search_edit.setPlaceholderText("🔍 Search username, phone, or name…")
+        self.user_search_edit.setPlaceholderText("🔍 Search by machine serial ID, username, phone, or name…")
         self.user_search_edit.setClearButtonEnabled(True)
         self.user_search_edit.setStyleSheet("""
             QLineEdit {
@@ -993,7 +993,8 @@ class AdminReportsDialog(QDialog):
             users = [u for u in users if 
                      q in u.get('username', '').lower() or 
                      q in u.get('full_name', '').lower() or 
-                     q in u.get('phone', '').lower()]
+                     q in u.get('phone', '').lower() or
+                     q in u.get('serial_number', '').lower()]
         
         self._filtered_users = users
         

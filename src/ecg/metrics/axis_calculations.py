@@ -59,7 +59,12 @@ def calculate_qrs_axis_from_median(data: List[np.ndarray], leads: List[str],
         
         return qrs_axis
     except Exception as e:
-        print(f" Error calculating QRS axis: {e}")
+        # OPTIMIZED: Reduced error print frequency for better performance
+        if not hasattr(calculate_qrs_axis_from_median, '_error_count'):
+            calculate_qrs_axis_from_median._error_count = 0
+        calculate_qrs_axis_from_median._error_count += 1
+        if calculate_qrs_axis_from_median._error_count % 100 == 1:  # Print every 100th error
+            print(f" Error calculating QRS axis: {e}")
         return None
 
 
@@ -118,7 +123,12 @@ def calculate_p_axis_from_median(data: List[np.ndarray], leads: List[str],
         
         return p_axis
     except Exception as e:
-        print(f" Error calculating P axis: {e}")
+        # OPTIMIZED: Reduced error print frequency for better performance
+        if not hasattr(calculate_p_axis_from_median, '_error_count'):
+            calculate_p_axis_from_median._error_count = 0
+        calculate_p_axis_from_median._error_count += 1
+        if calculate_p_axis_from_median._error_count % 100 == 1:  # Print every 100th error
+            print(f" Error calculating P axis: {e}")
         return None
 
 
@@ -175,5 +185,10 @@ def calculate_t_axis_from_median(data: List[np.ndarray], leads: List[str],
         
         return t_axis
     except Exception as e:
-        print(f" Error calculating T axis: {e}")
+        # OPTIMIZED: Reduced error print frequency for better performance
+        if not hasattr(calculate_t_axis_from_median, '_error_count'):
+            calculate_t_axis_from_median._error_count = 0
+        calculate_t_axis_from_median._error_count += 1
+        if calculate_t_axis_from_median._error_count % 100 == 1:  # Print every 100th error
+            print(f" Error calculating T axis: {e}")
         return None

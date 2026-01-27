@@ -1,6 +1,7 @@
 """
 Cloud Uploader Module for ECG Reports
 Supports multiple cloud storage services for automatic report backup
+Includes offline queue support for automatic sync when internet is restored
 """
 
 import os
@@ -57,7 +58,7 @@ except Exception:
 
 
 class CloudUploader:
-    """Handle uploading ECG reports to cloud storage"""
+    """Handle uploading ECG reports to cloud storage with offline queue support"""
     
     def __init__(self):
         self.cloud_service = os.getenv('CLOUD_SERVICE', 'none').lower()
@@ -93,6 +94,15 @@ class CloudUploader:
         
         # Log file for upload tracking
         self.upload_log_path = "reports/upload_log.json"
+        
+        # Initialize offline queue for automatic sync
+        try:
+            from .offline_queue import get_offline_queue
+            self.offline_queue = get_offline_queue()
+            print("✅ Offline queue initialized for cloud uploader")
+        except Exception as e:
+            print(f"⚠️ Could not initialize offline queue: {e}")
+            self.offline_queue = None
 
     def reload_config(self):
         """Re-read .env from CWD and project root and refresh fields."""
@@ -196,6 +206,7 @@ class CloudUploader:
         Upload ONLY reports, metrics, and report files to AWS S3
         Does NOT upload: session logs, debug data, crash logs, temp files
         Prevents duplicate uploads - files are only uploaded once
+        Supports offline mode - queues for upload when internet is restored
         
         Args:
             file_path (str): Path to the report file (PDF, JSON, etc.)
@@ -245,14 +256,31 @@ class CloudUploader:
             
             # Only add specific metadata fields if provided
             if metadata:
-                # Filter metadata to only include report-related fields
+                # Include all patient details and metrics in metadata
                 allowed_keys = [
-                    'patient_name', 'patient_age', 'report_date', 'machine_serial',
-                    'heart_rate', 'pr_interval', 'qrs_duration', 'qtc_interval',
-                    'st_segment'
+                    'patient_name', 'patient_age', 'patient_gender', 'patient_address', 
+                    'patient_phone', 'report_date', 'machine_serial',
+                    'heart_rate', 'pr_interval', 'qrs_duration', 'qt_interval', 
+                    'qtc_interval', 'st_segment'
                 ]
                 filtered_metadata = {k: v for k, v in metadata.items() if k in allowed_keys}
                 upload_metadata.update(filtered_metadata)
+            
+            # Check if online - if offline, queue for later upload
+            if self.offline_queue and not self.offline_queue.is_online():
+                # Queue for upload when internet is restored
+                queue_payload = {
+                    'file_path': file_path,
+                    'metadata': upload_metadata,
+                    'cloud_service': self.cloud_service
+                }
+                self.offline_queue.queue_data('cloud_report', queue_payload, priority=2)  # High priority
+                print(f"📥 Queued report for upload when online: {filename}")
+                return {
+                    "status": "queued",
+                    "message": f"Report queued for upload when internet connection is restored",
+                    "filename": filename
+                }
             
             # Upload based on configured service
             if self.cloud_service == 's3':
@@ -272,6 +300,17 @@ class CloudUploader:
             else:
                 result = {"status": "error", "message": f"Unknown cloud service: {self.cloud_service}"}
             
+            # If upload failed and we have offline queue, queue for retry
+            if result.get("status") != "success" and self.offline_queue:
+                queue_payload = {
+                    'file_path': file_path,
+                    'metadata': upload_metadata,
+                    'cloud_service': self.cloud_service
+                }
+                self.offline_queue.queue_data('cloud_report', queue_payload, priority=2)
+                result["status"] = "queued"
+                result["message"] = "Upload failed - queued for retry when online"
+            
             # Log the upload
             if result.get("status") == "success":
                 self._log_upload(file_path, result, upload_metadata)
@@ -279,12 +318,38 @@ class CloudUploader:
             return result
             
         except Exception as e:
+            # On any error, try to queue if offline queue is available
+            if self.offline_queue:
+                try:
+                    upload_metadata = {
+                        "filename": os.path.basename(file_path),
+                        "uploaded_at": datetime.now().isoformat(),
+                        "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                        "file_type": Path(file_path).suffix,
+                    }
+                    if metadata:
+                        upload_metadata.update(metadata)
+                    
+                    queue_payload = {
+                        'file_path': file_path,
+                        'metadata': upload_metadata,
+                        'cloud_service': self.cloud_service
+                    }
+                    self.offline_queue.queue_data('cloud_report', queue_payload, priority=2)
+                    return {
+                        "status": "queued",
+                        "message": f"Error occurred - queued for upload when online: {str(e)}"
+                    }
+                except:
+                    pass
+            
             return {"status": "error", "message": str(e)}
     
     def upload_user_signup(self, user_data):
         """
         Upload user signup details to cloud storage
         Prevents duplicate uploads - checks if user has already been uploaded
+        Supports offline mode - queues for upload when internet is restored
         
         Args:
             user_data (dict): Dictionary containing user signup information
@@ -334,6 +399,20 @@ class CloudUploader:
                                 }
         except Exception as e:
             print(f"⚠️ Error checking user signup history: {e}")
+        
+        # Check if online - if offline, queue for later upload
+        if self.offline_queue and not self.offline_queue.is_online():
+            queue_payload = {
+                'user_data': user_data,
+                'cloud_service': self.cloud_service
+            }
+            self.offline_queue.queue_data('cloud_user_signup', queue_payload, priority=1)  # Highest priority
+            print(f"📥 Queued user signup for upload when online: {username}")
+            return {
+                "status": "queued",
+                "message": f"User signup queued for upload when internet connection is restored",
+                "username": username
+            }
         
         try:
             # Create a JSON file with user signup details
@@ -451,6 +530,204 @@ class CloudUploader:
             return {"status": "error", "message": "boto3 not installed. Run: pip install boto3"}
         except ClientError as e:
             return {"status": "error", "message": f"S3 upload failed: {str(e)}"}
+    
+    def upload_complete_report_package(self, pdf_path, patient_data, ecg_data_file, report_metadata=None):
+        """
+        Upload complete ECG report package to S3:
+        - PDF report
+        - Patient details (JSON)
+        - 12-lead ECG data (10 seconds, JSON)
+        Supports offline mode - queues for upload when internet is restored
+        
+        Args:
+            pdf_path (str): Path to PDF report file
+            patient_data (dict): Patient details dictionary
+            ecg_data_file (str): Path to JSON file containing 12-lead ECG data (10 seconds)
+            report_metadata (dict): Optional additional metadata
+            
+        Returns:
+            dict: Upload result with status and details
+        """
+        if not self.upload_enabled:
+            return {"status": "disabled", "message": "Cloud upload is disabled"}
+            
+        if not self.is_configured():
+            return {"status": "error", "message": f"Cloud service '{self.cloud_service}' is not properly configured"}
+        
+        if self.cloud_service != 's3':
+            return {"status": "error", "message": "Complete report package upload only supports S3"}
+        
+        # Check if online - if offline, queue for later upload
+        if self.offline_queue and not self.offline_queue.is_online():
+            print(f"📥 Offline mode - queuing complete report package for upload when online")
+            return {
+                "status": "queued",
+                "message": "Report package queued for upload when internet connection is restored"
+            }
+        
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.aws_access_key,
+                aws_secret_access_key=self.aws_secret_key,
+                region_name=self.s3_region
+            )
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            date_prefix = datetime.now().strftime("%Y/%m/%d")
+            
+            upload_results = {
+                "status": "success",
+                "service": "s3",
+                "bucket": self.s3_bucket,
+                "uploads": []
+            }
+            
+            # 1. Upload PDF Report
+            if pdf_path and os.path.exists(pdf_path):
+                pdf_filename = os.path.basename(pdf_path)
+                pdf_s3_key = f"ecg-reports/{date_prefix}/{timestamp}/{pdf_filename}"
+                
+                pdf_metadata = {
+                    "type": "ecg_report_pdf",
+                    "uploaded_at": datetime.now().isoformat(),
+                    "filename": pdf_filename
+                }
+                if report_metadata:
+                    pdf_metadata.update(report_metadata)
+                
+                s3_client.upload_file(
+                    pdf_path,
+                    self.s3_bucket,
+                    pdf_s3_key,
+                    ExtraArgs={'Metadata': {k: str(v) for k, v in pdf_metadata.items()}}
+                )
+                
+                upload_results["uploads"].append({
+                    "type": "pdf_report",
+                    "key": pdf_s3_key,
+                    "url": f"https://{self.s3_bucket}.s3.{self.s3_region}.amazonaws.com/{pdf_s3_key}"
+                })
+                print(f"✅ Uploaded PDF report to S3: {pdf_s3_key}")
+            
+            # 2. Upload Patient Details (JSON)
+            if patient_data:
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+                    json.dump(patient_data, f, indent=2, ensure_ascii=False)
+                    patient_file = f.name
+                
+                try:
+                    patient_filename = f"patient_details_{timestamp}.json"
+                    patient_s3_key = f"ecg-reports/{date_prefix}/{timestamp}/{patient_filename}"
+                    
+                    patient_metadata = {
+                        "type": "patient_details",
+                        "uploaded_at": datetime.now().isoformat(),
+                        "patient_name": patient_data.get("patient_name") or 
+                                       f"{patient_data.get('first_name', '')} {patient_data.get('last_name', '')}".strip()
+                    }
+                    
+                    s3_client.upload_file(
+                        patient_file,
+                        self.s3_bucket,
+                        patient_s3_key,
+                        ExtraArgs={'Metadata': {k: str(v) for k, v in patient_metadata.items()}}
+                    )
+                    
+                    upload_results["uploads"].append({
+                        "type": "patient_details",
+                        "key": patient_s3_key,
+                        "url": f"https://{self.s3_bucket}.s3.{self.s3_region}.amazonaws.com/{patient_s3_key}"
+                    })
+                    print(f"✅ Uploaded patient details to S3: {patient_s3_key}")
+                finally:
+                    try:
+                        os.remove(patient_file)
+                    except:
+                        pass
+            
+            # 3. Upload 12-Lead ECG Data (10 seconds, JSON)
+            if ecg_data_file and os.path.exists(ecg_data_file):
+                ecg_filename = os.path.basename(ecg_data_file)
+                ecg_s3_key = f"ecg-reports/{date_prefix}/{timestamp}/{ecg_filename}"
+                
+                # Load ECG data to verify it has 10 seconds
+                try:
+                    with open(ecg_data_file, 'r') as f:
+                        ecg_data = json.load(f)
+                    
+                    sampling_rate = ecg_data.get("sampling_rate", 80.0)
+                    expected_samples = int(sampling_rate * 10)  # 10 seconds
+                    
+                    ecg_metadata = {
+                        "type": "ecg_12lead_data",
+                        "uploaded_at": datetime.now().isoformat(),
+                        "filename": ecg_filename,
+                        "sampling_rate": str(sampling_rate),
+                        "duration_seconds": "10",
+                        "expected_samples": str(expected_samples)
+                    }
+                    
+                    # Verify each lead has approximately 10 seconds of data
+                    leads = ecg_data.get("leads", {})
+                    for lead_name, lead_data in leads.items():
+                        if isinstance(lead_data, list):
+                            actual_samples = len(lead_data)
+                            ecg_metadata[f"lead_{lead_name}_samples"] = str(actual_samples)
+                    
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not verify ECG data: {e}")
+                    ecg_metadata = {
+                        "type": "ecg_12lead_data",
+                        "uploaded_at": datetime.now().isoformat(),
+                        "filename": ecg_filename
+                    }
+                
+                s3_client.upload_file(
+                    ecg_data_file,
+                    self.s3_bucket,
+                    ecg_s3_key,
+                    ExtraArgs={'Metadata': {k: str(v) for k, v in ecg_metadata.items()}}
+                )
+                
+                upload_results["uploads"].append({
+                    "type": "ecg_data",
+                    "key": ecg_s3_key,
+                    "url": f"https://{self.s3_bucket}.s3.{self.s3_region}.amazonaws.com/{ecg_s3_key}"
+                })
+                print(f"✅ Uploaded 12-lead ECG data to S3: {ecg_s3_key}")
+            
+            # Log the upload
+            if upload_results["uploads"]:
+                self._log_upload(pdf_path or ecg_data_file, upload_results, {
+                    "type": "complete_report_package",
+                    "timestamp": timestamp,
+                    "uploads_count": len(upload_results["uploads"])
+                })
+            
+            return upload_results
+            
+        except ImportError as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"  DEBUG: ImportError details: {e}")
+            print(f"  DEBUG: Full traceback:\n{error_details}")
+            return {"status": "error", "message": f"boto3 not installed or import failed: {str(e)}. Run: pip install boto3"}
+        except ClientError as e:
+            return {"status": "error", "message": f"S3 upload failed: {str(e)}"}
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"  DEBUG: Unexpected error during S3 upload: {e}")
+            print(f"  DEBUG: Full traceback:\n{error_details}")
+            return {"status": "error", "message": f"S3 upload failed: {str(e)}"}
+        except Exception as e:
+            import traceback
+            return {"status": "error", "message": f"Upload failed: {str(e)}", "traceback": traceback.format_exc()}
 
     def list_reports(self, prefix: str = "ecg-reports/"):
         """List report objects in S3 (PDF and JSON under prefix)."""

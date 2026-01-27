@@ -1,6 +1,6 @@
 """Serial communication classes for ECG hardware"""
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 from PyQt5.QtWidgets import QMessageBox
 
 try:
@@ -32,9 +32,134 @@ except ImportError:
 from utils.crash_logger import get_crash_logger
 from .packet_parser import parse_packet, PACKET_SIZE, START_BYTE, END_BYTE
 
+# Import hardware command handler (only if serial is available)
+if SERIAL_AVAILABLE:
+    from .hardware_commands import HardwareCommandHandler
+else:
+    # Dummy class for when serial is not available
+    class HardwareCommandHandler:
+        def __init__(self, *args, **kwargs): pass
+        def send_start_command(self): return (False, None)
+        def send_stop_command(self): return (False, None)
+        def send_version_command(self): return (False, None, None)
+        def send_close_command(self): return (False, None)
+
 
 class SerialStreamReader:
     """Packet-based serial reader for ECG data - NEW IMPLEMENTATION"""
+    
+    @staticmethod
+    def scan_and_detect_port(baudrate: int = 115200, timeout: float = 0.1) -> Optional[tuple]:
+        """
+        Scan all available COM ports and detect which one responds to START command
+        
+        Args:
+            baudrate: Baud rate to use for scanning (default: 115200)
+            timeout: Timeout per port in seconds (default: 0.1 = 100ms)
+            
+        Returns:
+            tuple: (port_name: str, serial_port: Serial) if found, or None if none found
+                   The serial port is already opened and has START command sent
+        """
+        if not SERIAL_AVAILABLE:
+            print("❌ Port scanning failed: Serial module not available")
+            return None
+        
+        print("\n" + "="*70)
+        print("🔍 PORT SCANNING: Scanning all COM ports for ECG device...")
+        print("="*70)
+        
+        # Get all available COM ports
+        try:
+            ports = serial.tools.list_ports.comports()
+            port_list = [port.device for port in ports]
+            print(f"📋 Found {len(port_list)} COM port(s): {', '.join(port_list)}")
+        except Exception as e:
+            print(f"❌ Error listing COM ports: {e}")
+            return None
+        
+        if not port_list:
+            print("⚠️ No COM ports found")
+            print("="*70 + "\n")
+            return None
+        
+        # Try each port
+        detected_port = None
+        detected_serial = None
+        temp_ports = []  # Track opened ports to close them
+        
+        for port_name in port_list:
+            print(f"\n🔌 Testing port: {port_name}")
+            temp_ser = None
+            try:
+                # Open port with short timeout for quick scanning
+                temp_ser = serial.Serial(
+                    port=port_name,
+                    baudrate=baudrate,
+                    timeout=timeout,
+                    write_timeout=timeout
+                )
+                temp_ports.append(temp_ser)
+                
+                # Clear any existing data
+                temp_ser.reset_input_buffer()
+                temp_ser.reset_output_buffer()
+                
+                # Create temporary command handler
+                temp_handler = HardwareCommandHandler(temp_ser)
+                
+                # Send START command with reduced timeout for faster scanning (100ms)
+                # Use quiet mode during scanning to reduce verbosity
+                print(f"   📤 Sending START command to {port_name}...")
+                success, response = temp_handler.send_start_command(timeout=timeout, quiet=True)
+                
+                if success:
+                    print(f"   ✅ Port {port_name} responded with ACK!")
+                    detected_port = port_name
+                    detected_serial = temp_ser
+                    # Remove from temp_ports so we don't close it
+                    temp_ports.remove(temp_ser)
+                    break
+                else:
+                    print(f"   ❌ Port {port_name} did not respond correctly")
+                    temp_ser.close()
+                    temp_ports.remove(temp_ser)
+                    
+            except serial.SerialException as e:
+                print(f"   ⚠️ Port {port_name} error: {e}")
+                if temp_ser and temp_ser in temp_ports:
+                    try:
+                        temp_ser.close()
+                        temp_ports.remove(temp_ser)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"   ⚠️ Port {port_name} unexpected error: {e}")
+                if temp_ser and temp_ser in temp_ports:
+                    try:
+                        temp_ser.close()
+                        temp_ports.remove(temp_ser)
+                    except:
+                        pass
+        
+        # Close all temporary ports (keep the detected one open)
+        for temp_ser in temp_ports:
+            try:
+                if temp_ser.is_open:
+                    temp_ser.close()
+            except:
+                pass
+        
+        if detected_port and detected_serial:
+            print(f"\n✅ PORT DETECTED: {detected_port}")
+        else:
+            print(f"\n❌ No port responded to START command")
+        
+        print("="*70 + "\n")
+        
+        if detected_port and detected_serial:
+            return (detected_port, detected_serial)
+        return None
     
     def __init__(self, port: str, baudrate: int, timeout: float = 0.1):
         if not SERIAL_AVAILABLE:
@@ -58,6 +183,12 @@ class SerialStreamReader:
         self._last_packet_counter = None
         self._total_sequence_lost = 0
         self._packet_loss_warnings = 0
+        # Initialize hardware command handler
+        if SERIAL_AVAILABLE:
+            self.command_handler = HardwareCommandHandler(self.ser)
+        else:
+            self.command_handler = None
+        self.device_version = None
         print(f" SerialStreamReader initialized: Port={port}, Baud={baudrate}")
 
     def close(self) -> None:
@@ -65,6 +196,16 @@ class SerialStreamReader:
         try:
             # Stop data acquisition first
             self.running = False
+            
+            # COMMENTED OUT: Hardware CLOSE command disabled
+            # Send CLOSE command to hardware if command handler is available
+            # if self.command_handler:
+            #     try:
+            #         success, response = self.command_handler.send_close_command()
+            #         if not success:
+            #             print(" ⚠️ Warning: CLOSE command ACK not received")
+            #     except Exception as e:
+            #         print(f" ⚠️ Error sending CLOSE command: {e}")
             
             # Flush any remaining data
             if hasattr(self.ser, 'reset_input_buffer'):
@@ -88,12 +229,110 @@ class SerialStreamReader:
             self.buf.clear()
         except Exception as e:
             print(f" Error closing serial connection: {e}")
+    
+    def get_device_version(self) -> Optional[str]:
+        """
+        Get device version - COMMENTED OUT: hardware version command disabled
+        Returns None since hardware commands are disabled
+        """
+        # COMMENTED OUT: Hardware VERSION command disabled
+        # print("\n" + "="*60)
+        # print("🔍 VERSION COMMAND: Requesting device version...")
+        # print("="*60)
+        # 
+        # if not self.command_handler:
+        #     print("❌ VERSION COMMAND: Command handler not available")
+        #     return None
+        # 
+        # try:
+        #     success, version, response = self.command_handler.send_version_command()
+        #     if success and version:
+        #         self.device_version = version
+        #         print(f"✅ VERSION COMMAND: Success! Device version: '{version}'")
+        #         print("="*60 + "\n")
+        #         return version
+        #     else:
+        #         print(f"⚠️ VERSION COMMAND: Failed or no version received")
+        #         print(f"   Success: {success}, Version: {version}, Response: {response}")
+        #         print("="*60 + "\n")
+        #     return None
+        # except Exception as e:
+        #     print(f"❌ VERSION COMMAND: Error getting device version: {e}")
+        #     print("="*60 + "\n")
+        #     return None
+        
+        # Hardware commands disabled - return None
+        return None
 
     def start(self):
-        """Start data acquisition"""
+        """Start data acquisition - COMMENTED OUT: hardware commands disabled for now"""
         print(" Starting packet-based ECG data acquisition...")
-        self.ser.reset_input_buffer()
-        self.buf.clear()
+        
+        # COMMENTED OUT: Hardware command scanning and START command
+        # Get current port info before scanning
+        current_port = self.ser.port if hasattr(self.ser, 'port') else None
+        current_baudrate = self.ser.baudrate if hasattr(self.ser, 'baudrate') else 115200
+        current_port_open = self.ser.is_open if hasattr(self.ser, 'is_open') else False
+        
+        # COMMENTED OUT: Port scanning with START command
+        # Temporarily close current port if open (to avoid conflicts during scanning)
+        # if current_port_open:
+        #     try:
+        #         self.ser.close()
+        #     except:
+        #         pass
+        
+        # COMMENTED OUT: Scan all COM ports to find which one responds to START command
+        # Step 1: Scan all COM ports to find which one responds to START command
+        # Use slightly longer timeout (150ms) to give device time to respond
+        scan_result = None  # COMMENTED OUT: self.scan_and_detect_port(baudrate=current_baudrate, timeout=0.15)
+        
+        # COMMENTED OUT: All hardware command logic disabled
+        # if scan_result:
+        #     detected_port_name, detected_serial = scan_result
+        #     ... (all START command logic commented out)
+        # else:
+        #     ... (all START command logic commented out)
+        
+        # SIMPLIFIED: Just ensure port is open and ready (no hardware commands)
+        if not current_port_open:
+            # Reopen the port if it was closed
+            if current_port:
+                try:
+                    print(f"   🔄 Opening port {current_port}...")
+                    self.ser = serial.Serial(port=current_port, baudrate=current_baudrate, timeout=0.1)
+                    print(f"   ✅ Port {current_port} opened")
+                except Exception as e:
+                    print(f"   ❌ Failed to open port {current_port}: {e}")
+                    raise RuntimeError(f"Cannot open port {current_port}: {e}")
+        
+        # COMMENTED OUT: Hardware START command
+        # Try sending START command on current port
+        # try:
+        #     self.ser.reset_input_buffer()
+        #     self.buf.clear()
+        #     if self.command_handler:
+        #         success, response = self.command_handler.send_start_command()
+        #         if not success:
+        #             print(" ⚠️ Warning: START command ACK not received on current port")
+        #             print("   Continuing anyway - device may still send data...")
+        #     else:
+        #         print(" ⚠️ Warning: Command handler not available")
+        # except Exception as e:
+        #     print(f" ⚠️ Warning: Error sending START command: {e}")
+        #     print("   Continuing anyway - device may still send data...")
+        
+        # Verify port is open and ready
+        if not self.ser.is_open:
+            raise RuntimeError(f"Serial port is not open. Cannot start data acquisition.")
+        
+        # Clear buffers (no hardware commands - device should send data automatically)
+        try:
+            self.ser.reset_input_buffer()
+            self.buf.clear()
+        except Exception as e:
+            print(f" ⚠️ Warning: Could not clear buffers: {e}")
+        
         self.running = True
         # Initialize packet loss tracking
         self.start_time = time.time()
@@ -102,12 +341,20 @@ class SerialStreamReader:
         self.total_packets_expected = 0
         self.total_packets_lost = 0
         self.packet_loss_percent = 0.0
-        print(" Packet-based ECG device started - waiting for data packets...")
+        print(f" ✅ Packet-based ECG device started on port {self.ser.port if hasattr(self.ser, 'port') else 'unknown'}")
+        print(" 📡 Ready to receive data packets...")
 
     def stop(self):
         """Stop data acquisition"""
         print(" Stopping packet-based ECG data acquisition...")
         self.running = False
+        
+        # COMMENTED OUT: Hardware STOP command disabled
+        # Send STOP command to hardware
+        # success, response = self.command_handler.send_stop_command()
+        # if not success:
+        #     print(" ⚠️ Warning: STOP command ACK not received")
+        
         # Final packet loss statistics
         if hasattr(self, 'start_time') and self.start_time > 0:
             elapsed_time = time.time() - self.start_time
@@ -144,17 +391,26 @@ class SerialStreamReader:
         try:
             # Read larger chunks to prevent buffer overflow at 500 Hz
             # At 500 Hz with 22-byte packets = 11,000 bytes/second
-            # Read up to 4096 bytes per call to catch up quickly
-            chunk = self.ser.read(4096)  # Increased from default (usually 1024)
+            # Read MORE bytes if buffer is accumulating (indicates we're falling behind)
+            read_size = 4096
+            if len(self.buf) > 20000:  # If buffer > 20KB, read more aggressively
+                read_size = 8192  # Read 8KB to catch up faster
+            elif len(self.buf) > 50000:  # If buffer > 50KB, read even more
+                read_size = 16384  # Read 16KB to catch up quickly
+            
+            chunk = self.ser.read(read_size)
             if chunk:
                 self.buf.extend(chunk)
 
             # Extract packets - process ALL available packets to prevent buffer overflow
             # At 500 Hz, we need to process packets quickly to avoid accumulation
-            # Read ALL packets in buffer, not just max_packets, to prevent overflow
-            max_iterations = max_packets * 3  # Allow catching up if we fell behind
+            # CRITICAL: Process ALL packets in buffer, not limited by max_packets, to prevent packet loss
+            # Use max_iterations as safety limit, but process as many as needed
+            max_iterations = max(max_packets * 5, 500)  # Allow catching up significantly if we fell behind
             iteration = 0
-            while iteration < max_iterations:
+            packets_processed = 0
+            
+            while iteration < max_iterations and len(self.buf) >= PACKET_SIZE:
                 iteration += 1
                 start_idx = self.buf.find(bytes([START_BYTE]))
                 if start_idx == -1:
@@ -183,6 +439,7 @@ class SerialStreamReader:
                 if parsed:
                     self.data_count += 1
                     self.last_packet_time = time.time()
+                    packets_processed += 1
                     
                     # Extract packet counter for sequence tracking
                     packet_counter = candidate[1] & 0x3F  # Counter is in lower 6 bits (0-63)
@@ -201,23 +458,28 @@ class SerialStreamReader:
                             if lost > 0:
                                 self._total_sequence_lost += lost
                                 self._packet_loss_warnings += 1
-                                # Only warn every 10th occurrence to avoid spam
-                                if self._packet_loss_warnings % 10 == 1:
-                                    print(f" PACKET LOSS DETECTED: {lost} packet(s) dropped! "
-                                          f"Expected counter: {expected_counter}, Got: {packet_counter}. "
-                                          f"Total sequence lost: {self._total_sequence_lost}")
+                                # Only warn every 50th occurrence to avoid spam (optimized for performance)
+                                if self._packet_loss_warnings % 50 == 1:
+                                    print(f" ⚠️ Packet loss: {lost} dropped (Total: {self._total_sequence_lost})")
                     
                     self._last_packet_counter = packet_counter
                     
-                    # Only log every 100th packet to reduce console spam
-                    if self.data_count % 100 == 0:
-                        loss_info = f" (Sequence lost: {self._total_sequence_lost})" if self._total_sequence_lost > 0 else ""
-                        print(f" [Packet #{self.data_count}, Counter: {packet_counter}]{loss_info} Received valid packet with {len(parsed)} leads")
+                    # Only log every 500th packet to reduce console spam (optimized for performance)
+                    if self.data_count % 500 == 0:
+                        loss_info = f" (Lost: {self._total_sequence_lost})" if self._total_sequence_lost > 0 else ""
+                        print(f" 📡 Packet #{self.data_count}{loss_info}")
                     out.append(parsed)
+            
+            # If we processed many packets, we're catching up - this is good
+            if packets_processed > max_packets * 2:
+                # We're catching up from backlog - this is expected and good
+                pass
             
             # Warn if buffer is accumulating too much data (indicates we're falling behind)
             if len(self.buf) > 50000:  # >50KB buffer indicates we're not reading fast enough
-                print(f" Serial buffer accumulation: {len(self.buf)} bytes - may indicate packet loss")
+                if not hasattr(self, '_buffer_warn_time') or (time.time() - self._buffer_warn_time) > 5.0:
+                    print(f" ⚠️ Buffer: {len(self.buf)} bytes")
+                    self._buffer_warn_time = time.time()
             
             # Update packet loss statistics
             if self.running and self.data_count > 0:
@@ -284,7 +546,8 @@ class SerialECGReader:
         print(" Starting ECG data acquisition...")
         self.ser.reset_input_buffer()
         self.ser.write(b'1\r\n')
-        time.sleep(0.5)
+        # INSTANT START: Reduced delay for immediate wave display
+        time.sleep(0.1)  # Reduced from 0.5s to 0.1s for faster startup
         self.running = True
         print(" ECG device started - waiting for data...")
 

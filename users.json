@@ -120,5 +120,16 @@
     "age": "22",
     "gender": "Male",
     "address": "1220 JFF SECTOR 2 FBD HRY"
+  },
+  "9560350477": {
+    "password": "9560350477",
+    "full_name": "Pr",
+    "phone": "9560350477",
+    "serial_id": "ECG123",
+    "email": "",
+    "signup_date": "2026-01-27",
+    "age": "12",
+    "gender": "male",
+    "address": "122"
   }
 }

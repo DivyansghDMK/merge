@@ -7,6 +7,7 @@ from reportlab.platypus import (
 import os
 import sys
 import json
+from datetime import datetime
 import matplotlib.pyplot as plt  
 import matplotlib
 import numpy as np
@@ -218,6 +219,10 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
         if ecg_test_page.data and len(ecg_test_page.data) > 0:
             print(f"   data[0] length: {len(ecg_test_page.data[0]) if isinstance(ecg_test_page.data[0], (list, np.ndarray)) else 'N/A'}")
     
+    # Calculate samples needed for exactly 10 seconds
+    sampling_rate = saved_data.get("sampling_rate", 80.0)
+    samples_for_10_sec = int(sampling_rate * 10)
+    
     for i, lead_name in enumerate(lead_names):
         data_to_save = []
         
@@ -230,28 +235,45 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
                     ptr = ecg_test_page.ptrs[i]
                     window_size = getattr(ecg_test_page, 'window_size', 1000)
                     
-                    # For report generation: use FULL buffer (5000 samples), not just window_size (1000)
                     # Get all available data from buffer, starting from ptr
                     if ptr + len(buffer) <= len(buffer):
                         # No wrap needed: get from ptr to end, then from start to ptr
                         part1 = buffer[ptr:].tolist()
                         part2 = buffer[:ptr].tolist()
-                        data_to_save = part1 + part2  # Full circular buffer
+                        full_buffer = part1 + part2  # Full circular buffer
                     else:
                         # Simple case: use all buffer data
-                        data_to_save = buffer.tolist()
+                        full_buffer = buffer.tolist()
+                    
+                    # Extract exactly 10 seconds (most recent samples)
+                    if len(full_buffer) >= samples_for_10_sec:
+                        data_to_save = full_buffer[-samples_for_10_sec:]
+                    else:
+                        data_to_save = full_buffer  # Use all available if less than 10 seconds
                 else:
                     # No ptrs: use ALL available data (full buffer)
-                    data_to_save = buffer.tolist()
+                    full_buffer = buffer.tolist()
+                    # Extract exactly 10 seconds (most recent samples)
+                    if len(full_buffer) >= samples_for_10_sec:
+                        data_to_save = full_buffer[-samples_for_10_sec:]
+                    else:
+                        data_to_save = full_buffer  # Use all available if less than 10 seconds
         
         # Priority 2: Fallback to ecg_test_page.data (smaller buffer, 1000 samples)
         if not data_to_save and i < len(ecg_test_page.data):
             lead_data = ecg_test_page.data[i]
             if isinstance(lead_data, np.ndarray):
-                # Use ALL available data (not just window_size)
-                data_to_save = lead_data.tolist()
+                full_data = lead_data.tolist()
             elif isinstance(lead_data, (list, tuple)):
-                data_to_save = list(lead_data)
+                full_data = list(lead_data)
+            else:
+                full_data = []
+            
+            # Extract exactly 10 seconds (most recent samples)
+            if len(full_data) >= samples_for_10_sec:
+                data_to_save = full_data[-samples_for_10_sec:]
+            else:
+                data_to_save = full_data  # Use all available if less than 10 seconds
         
         saved_data["leads"][lead_name] = data_to_save if data_to_save else []
     
@@ -272,14 +294,26 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
             print(f"   Expected time window: 13.2s")
             print(f"    TIP: Run ECG for at least 15-20 seconds to accumulate sufficient data")
     
+    # Verify we have 10 seconds of data for each lead
+    sampling_rate = saved_data.get("sampling_rate", 80.0)
+    samples_for_10_sec = int(sampling_rate * 10)
+    actual_durations = {}
+    for lead_name, lead_data in saved_data["leads"].items():
+        if lead_data:
+            actual_samples = len(lead_data)
+            actual_duration = actual_samples / sampling_rate
+            actual_durations[lead_name] = actual_duration
+    
     # Save to file
     try:
         with open(output_file, 'w') as f:
             json.dump(saved_data, f, indent=2)
-        print(f"Saved ECG data to: {output_file}")
+        print(f"✅ Saved 12-lead ECG data (10 seconds) to: {output_file}")
         print(f"   Leads saved: {list(saved_data['leads'].keys())}")
         print(f"   Sampling rate: {saved_data['sampling_rate']} Hz")
-        print(f"   Total data points per lead: {[len(saved_data['leads'][lead]) for lead in saved_data['leads']]}")
+        print(f"   Expected samples for 10s: {samples_for_10_sec}")
+        print(f"   Actual samples per lead: {[len(saved_data['leads'][lead]) for lead in saved_data['leads']]}")
+        print(f"   Actual duration per lead: {[f'{actual_durations.get(lead, 0):.2f}s' for lead in saved_data['leads']]}")
         return output_file
     except Exception as e:
         print(f" Error saving ECG data: {e}")
@@ -3671,14 +3705,54 @@ def generate_ecg_report(
         except Exception:
             username = ""
 
+        # Get all patient details from dashboard_instance or data
+        patient_full_name = full_name
+        patient_age = str(age)
+        patient_gender = gender
+        patient_address = ""
+        patient_phone = ""
+        machine_serial_id = ""
+        
+        # Try to get patient details from dashboard_instance
+        if dashboard_instance:
+            if hasattr(dashboard_instance, 'user_details'):
+                user_details = dashboard_instance.user_details or {}
+                patient_full_name = user_details.get('full_name', patient_full_name)
+                patient_age = str(user_details.get('age', patient_age))
+                patient_gender = user_details.get('gender', patient_gender)
+                patient_address = user_details.get('address', '')
+                patient_phone = user_details.get('phone', '')
+                machine_serial_id = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
+        
+        # Also check data dict for machine serial
+        if not machine_serial_id:
+            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
+        
+        # Check patient dict if available
+        if patient and isinstance(patient, dict):
+            patient_full_name = patient.get('patient_name') or patient.get('name', patient_full_name)
+            patient_age = str(patient.get('age', patient_age))
+            patient_gender = patient.get('gender', patient_gender)
+            patient_address = patient.get('address', patient_address)
+            patient_phone = patient.get('phone', patient_phone)
+        
         params_entry = {
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "file": os.path.abspath(filename),
+            "report_date": date_time_str,
+            "machine_serial": machine_serial_id,
             "patient": {
-                "name": full_name,
-                "age": str(age),
-                "gender": gender,
+                "name": patient_full_name,
+                "age": patient_age,
+                "gender": patient_gender,
+                "address": patient_address,
+                "phone": patient_phone,
                 "date_time": date_time_str,
+            },
+            "user": {
+                "username": username,
+                "name": patient_full_name,
+                "phone": patient_phone,
             },
             "metrics": {
                 "HR_bpm": HR,
@@ -3695,6 +3769,15 @@ def generate_ecg_report(
             },
             "username": username  # Add username to track report ownership
         }
+        
+        # Save comprehensive JSON file alongside PDF
+        json_filename = os.path.splitext(filename)[0] + ".json"
+        try:
+            with open(json_filename, 'w', encoding='utf-8') as f:
+                json.dump(params_entry, f, indent=2, ensure_ascii=False)
+            print(f"✅ Saved comprehensive JSON report: {json_filename}")
+        except Exception as e:
+            print(f"⚠️ Could not save JSON report: {e}")
 
         existing_list = []
         if os.path.exists(index_path):
@@ -3766,17 +3849,158 @@ def generate_ecg_report(
         except Exception as hist_err:
             print(f" Failed to append ECG history entry: {hist_err}")
     
-    # Upload to cloud if configured
+    # Upload complete report package to S3 (PDF + Patient Details + 12-Lead Data)
     try:
         import sys
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from utils.cloud_uploader import get_cloud_uploader
         
         cloud_uploader = get_cloud_uploader()
-        if cloud_uploader.is_configured():
-            print(f"  Uploading report to cloud ({cloud_uploader.cloud_service})...")
+        if cloud_uploader.is_configured() and cloud_uploader.cloud_service == 's3':
+            print(f"  Uploading complete report package to S3 ({cloud_uploader.s3_bucket})...")
             
-            # Prepare metadata
+            # 1. Save 12-lead ECG data (10 seconds) if ecg_test_page is available
+            ecg_data_file = None
+            if ecg_test_page:
+                try:
+                    ecg_data_file = save_ecg_data_to_file(ecg_test_page)
+                    if ecg_data_file:
+                        print(f"  Saved 12-lead ECG data (10 seconds): {ecg_data_file}")
+                except Exception as e:
+                    print(f"  Warning: Could not save ECG data: {e}")
+            
+            # 2. Prepare comprehensive patient data with all details
+            patient_data_for_upload = {}
+            if patient and isinstance(patient, dict):
+                patient_data_for_upload = patient.copy()
+            else:
+                # Try to load from all_patients.json
+                try:
+                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                    patients_db_file = os.path.join(base_dir, "all_patients.json")
+                    if os.path.exists(patients_db_file):
+                        with open(patients_db_file, "r") as jf:
+                            all_patients = json.load(jf)
+                            if all_patients.get("patients") and len(all_patients["patients"]) > 0:
+                                patient_data_for_upload = all_patients["patients"][-1]
+                except Exception as e:
+                    print(f"  Warning: Could not load patient data: {e}")
+            
+            # Ensure all patient details are included from dashboard_instance
+            if dashboard_instance and hasattr(dashboard_instance, 'user_details'):
+                user_details = dashboard_instance.user_details or {}
+                if not patient_data_for_upload.get('patient_name') and not patient_data_for_upload.get('name'):
+                    patient_data_for_upload['patient_name'] = user_details.get('full_name', '')
+                    patient_data_for_upload['name'] = user_details.get('full_name', '')
+                if not patient_data_for_upload.get('age'):
+                    patient_data_for_upload['age'] = user_details.get('age', '')
+                if not patient_data_for_upload.get('gender'):
+                    patient_data_for_upload['gender'] = user_details.get('gender', '')
+                if not patient_data_for_upload.get('address'):
+                    patient_data_for_upload['address'] = user_details.get('address', '')
+                if not patient_data_for_upload.get('phone'):
+                    patient_data_for_upload['phone'] = user_details.get('phone', '')
+                if not patient_data_for_upload.get('serial_number'):
+                    patient_data_for_upload['serial_number'] = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
+            
+            # Also get machine serial from data
+            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
+            if machine_serial_id and not patient_data_for_upload.get('serial_number'):
+                patient_data_for_upload['serial_number'] = machine_serial_id
+            
+            # 3. Prepare comprehensive report metadata with all patient details
+            # Get patient details from dashboard_instance if available
+            patient_full_name = patient_data_for_upload.get('patient_name') or \
+                               f"{patient_data_for_upload.get('first_name', '')} {patient_data_for_upload.get('last_name', '')}".strip()
+            patient_age = str(patient_data_for_upload.get('age', ''))
+            patient_gender = patient_data_for_upload.get('gender', '')
+            patient_address = patient_data_for_upload.get('address', '')
+            patient_phone = patient_data_for_upload.get('phone', '')
+            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
+            
+            # Try to get from dashboard_instance
+            if dashboard_instance and hasattr(dashboard_instance, 'user_details'):
+                user_details = dashboard_instance.user_details or {}
+                if not patient_full_name:
+                    patient_full_name = user_details.get('full_name', patient_full_name)
+                if not patient_age:
+                    patient_age = str(user_details.get('age', patient_age))
+                if not patient_gender:
+                    patient_gender = user_details.get('gender', patient_gender)
+                if not patient_address:
+                    patient_address = user_details.get('address', patient_address)
+                if not patient_phone:
+                    patient_phone = user_details.get('phone', patient_phone)
+                if not machine_serial_id:
+                    machine_serial_id = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
+            
+            report_metadata = {
+                "patient_name": patient_full_name,
+                "patient_age": patient_age,
+                "patient_gender": patient_gender,
+                "patient_address": patient_address,
+                "patient_phone": patient_phone,
+                "report_date": patient_data_for_upload.get('date_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                "machine_serial": machine_serial_id,
+                "heart_rate": str(data.get('Heart_Rate', data.get('HR', ''))),
+                "pr_interval": str(data.get('PR', '')),
+                "qrs_duration": str(data.get('QRS', '')),
+                "qt_interval": str(data.get('QT', '')),
+                "qtc_interval": str(data.get('QTc', '')),
+            }
+            
+            # 4. Upload complete package (PDF + Patient Details + 12-Lead Data)
+            # This will automatically queue if offline
+            result = cloud_uploader.upload_complete_report_package(
+                pdf_path=filename,
+                patient_data=patient_data_for_upload,
+                ecg_data_file=ecg_data_file,
+                report_metadata=report_metadata
+            )
+            
+            if result.get('status') == 'success':
+                upload_count = len(result.get('uploads', []))
+                print(f"✅ Complete report package uploaded successfully to S3!")
+                print(f"   Uploaded {upload_count} file(s):")
+                for upload in result.get('uploads', []):
+                    print(f"     - {upload.get('type')}: {upload.get('key')}")
+            elif result.get('status') == 'queued':
+                print(f"📥 Report package queued for upload when internet connection is restored")
+                # Also queue individual components for offline queue
+                try:
+                    from utils.offline_queue import get_offline_queue
+                    offline_queue = get_offline_queue()
+                    queue_payload = {
+                        'pdf_path': filename,
+                        'patient_data': patient_data_for_upload,
+                        'ecg_data_file': ecg_data_file,
+                        'report_metadata': report_metadata,
+                        'cloud_service': 's3'
+                    }
+                    offline_queue.queue_data('cloud_complete_package', queue_payload, priority=2)
+                    print(f"✅ Report package queued for automatic sync")
+                except Exception as e:
+                    print(f"⚠️ Could not queue report package: {e}")
+            else:
+                print(f"  ❌ S3 upload failed: {result.get('message', 'Unknown error')}")
+                # Try to queue for retry
+                try:
+                    from utils.offline_queue import get_offline_queue
+                    offline_queue = get_offline_queue()
+                    queue_payload = {
+                        'pdf_path': filename,
+                        'patient_data': patient_data_for_upload,
+                        'ecg_data_file': ecg_data_file,
+                        'report_metadata': report_metadata,
+                        'cloud_service': 's3'
+                    }
+                    offline_queue.queue_data('cloud_complete_package', queue_payload, priority=2)
+                    print(f"📥 Report package queued for retry when online")
+                except Exception as e:
+                    print(f"⚠️ Could not queue report package: {e}")
+        elif cloud_uploader.is_configured():
+            # Fallback to simple report upload for non-S3 services
+            print(f"  Uploading report to cloud ({cloud_uploader.cloud_service})...")
             upload_metadata = {
                 "patient_name": data.get('patient', {}).get('name', 'Unknown'),
                 "patient_age": str(data.get('patient', {}).get('age', '')),
@@ -3784,23 +4008,27 @@ def generate_ecg_report(
                 "machine_serial": data.get('machine_serial', ''),
                 "heart_rate": str(data.get('Heart_Rate', '')),
             }
-            
-            # Upload the report
             result = cloud_uploader.upload_report(filename, metadata=upload_metadata)
-            
             if result.get('status') == 'success':
-                print(f" Report uploaded successfully to {cloud_uploader.cloud_service}")
-                if 'url' in result:
-                    print(f"  URL: {result['url']}")
+                print(f"✅ Report uploaded successfully to {cloud_uploader.cloud_service}")
             else:
-                print(f"  Cloud upload failed: {result.get('message', 'Unknown error')}")
+                print(f"  ❌ Cloud upload failed: {result.get('message', 'Unknown error')}")
         else:
-            print("  Cloud upload not configured (see cloud_config_template.txt)")
+            print("  ℹ️ Cloud upload not configured (see cloud_config_template.txt)")
+            print("     To enable S3 upload, set in .env:")
+            print("     CLOUD_UPLOAD_ENABLED=true")
+            print("     CLOUD_SERVICE=s3")
+            print("     AWS_S3_BUCKET=deck-backend-demo")
+            print("     AWS_S3_REGION=us-east-1")
+            print("     AWS_ACCESS_KEY_ID=...")
+            print("     AWS_SECRET_ACCESS_KEY=...")
             
     except ImportError:
-        print("  Cloud uploader not available")
+        print("  ⚠️ Cloud uploader not available (boto3 may not be installed)")
     except Exception as e:
-        print(f"  Cloud upload error: {e}")
+        import traceback
+        print(f"  ❌ Cloud upload error: {e}")
+        traceback.print_exc()
 
 
 # REMOVE ENTIRE create_sample_ecg_images function (lines ~1222-1257)

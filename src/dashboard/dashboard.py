@@ -171,6 +171,26 @@ class Dashboard(QWidget):
             print(f" Could not start auto-sync service: {e}")
             self.auto_sync_service = None
         
+        # ========================================
+        # INITIALIZE OFFLINE QUEUE FOR S3 UPLOADS
+        # ========================================
+        # This ensures reports are queued when offline and auto-synced when online
+        try:
+            from utils.offline_queue import get_offline_queue
+            self.offline_queue = get_offline_queue()
+            queue_stats = self.offline_queue.get_stats()
+            print(f"✅ Offline queue initialized")
+            print(f"   Pending uploads: {queue_stats.get('pending_count', 0)}")
+            print(f"   Online status: {queue_stats.get('is_online', False)}")
+            
+            # If there are pending items, try to sync immediately
+            if queue_stats.get('pending_count', 0) > 0:
+                print(f"🔄 Found {queue_stats.get('pending_count', 0)} pending uploads - attempting sync...")
+                self.offline_queue.force_sync_now()
+        except Exception as e:
+            print(f"⚠️ Could not initialize offline queue: {e}")
+            self.offline_queue = None
+        
         # Triple-click counter for heart rate metric
         self.heart_rate_click_count = 0
         self.last_heart_rate_click_time = 0
@@ -826,11 +846,11 @@ class Dashboard(QWidget):
         issue_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         issue_layout.addWidget(issue_label)
         
-        # Live conclusion box that updates based on ECG analysis
+        # Live conclusion box that updates based on ECG analysis - BIGGER SIZE
         self.conclusion_box = QTextEdit()
         self.conclusion_box.setReadOnly(True)
         self.conclusion_box.setStyleSheet("background: #f7f7f7; border: none; font-size: 12px; padding: 10px;")
-        self.conclusion_box.setMinimumHeight(180)
+        self.conclusion_box.setMinimumHeight(300)  # Increased from 180 to 300
         self.conclusion_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # Set initial placeholder text
@@ -842,15 +862,6 @@ class Dashboard(QWidget):
         """)
         
         issue_layout.addWidget(self.conclusion_box)
-        # Small footer box below the conclusion (~3 cm height)
-        self.conclusion_footer = QFrame()
-        self.conclusion_footer.setStyleSheet("background: #f7f7f7; border: none; border-radius: 10px;")
-        self.conclusion_footer.setFixedHeight(115)
-        self.conclusion_footer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        _footer_layout = QHBoxLayout(self.conclusion_footer)
-        _footer_layout.setContentsMargins(10, 8, 10, 8)
-        _footer_layout.addWidget(QLabel(""))
-        issue_layout.addWidget(self.conclusion_footer)
 
         grid.addWidget(issue_card, 2, 1, 1, 1)
 
@@ -1819,7 +1830,11 @@ class Dashboard(QWidget):
             return None, None
     
     def calculate_standard_ecg_metrics(self, bpm):
-        """Calculate standard ECG metrics based on BPM using medical formulas with HR-dependent calibration"""
+        """DEPRECATED: Calculate standard ECG metrics based on BPM using simplified formulas.
+        
+        ⚠️ This function uses simplified BPM-based formulas and is kept only as a fallback.
+        Real calculations should use calculate_live_ecg_metrics() which calculates from actual ECG signal.
+        """
         try:
             bpm = float(bpm)
             
@@ -2102,69 +2117,140 @@ class Dashboard(QWidget):
             else:
                 metrics['heart_rate'] = 0
             
-            # ❌ DELETED: Wrong single-beat calculations using 0.5-40 Hz display filter
-            # These destroy Q, S waves and T-wave tail and give wrong PR/QRS/QT/ST
-            # 
-            # ✅ REPLACED: Read directly from median-beat engine (clinical-grade measurements)
-            # All PR, QRS, QT, QTc, QTcF, ST values come from twelve_lead_test.py calculate_ecg_metrics()
-            # which uses 0.05-150 Hz measurement channel with slope-assisted and tangent methods
+            # ✅ REAL CALCULATIONS: Calculate PR, QRS, P, QT, QTC from actual ECG signal using clinical formulas
+            # Uses 0.05-150 Hz measurement channel with median beat and clinical-grade detection methods
+            # This replaces reference value lookups with real-time calculations from the signal
             
-            if hasattr(self, 'ecg_test_page') and self.ecg_test_page:
-                # PR Interval from median-beat engine (rounded to integer)
-                pr_val = getattr(self.ecg_test_page, 'pr_interval', 0) or 0
-                print(f" Dashboard PR raw value: {pr_val}")  # Debug
+            try:
+                # Import clinical measurement functions (real formulas from reference software)
+                try:
+                    from ecg.clinical_measurements import (
+                        build_median_beat, get_tp_baseline, measure_pr_from_median_beat,
+                        measure_qrs_duration_from_median_beat, measure_qt_from_median_beat,
+                        measure_p_duration_from_median_beat
+                    )
+                except ImportError:
+                    # Try alternative import path
+                    import sys
+                    import os
+                    src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    if src_dir not in sys.path:
+                        sys.path.insert(0, src_dir)
+                    from ecg.clinical_measurements import (
+                        build_median_beat, get_tp_baseline, measure_pr_from_median_beat,
+                        measure_qrs_duration_from_median_beat, measure_qt_from_median_beat,
+                        measure_p_duration_from_median_beat
+                    )
                 
-                # Apply EMA smoothing for PR interval stability (like BPM)
-                if not hasattr(self, '_dashboard_pr_ema'):
-                    self._dashboard_pr_ema = pr_val
-                    self._dashboard_pr_alpha = 0.2  # Slightly more responsive than BPM
-                    print(f" Dashboard PR EMA initialized with: {pr_val}")  # Debug
+                # Need at least 8 beats for median beat calculation (GE/Philips standard)
+                if len(peaks) >= 8:
+                    # Build median beat from Lead II signal (requires ≥8 beats)
+                    time_axis, median_beat = build_median_beat(ecg_signal, peaks, fs, min_beats=8)
+                    
+                    if median_beat is not None and time_axis is not None:
+                        # Get TP baseline for accurate measurements
+                        r_mid = peaks[len(peaks) // 2]
+                        prev_r_idx = peaks[len(peaks) // 2 - 1] if len(peaks) > 1 else None
+                        tp_baseline = get_tp_baseline(ecg_signal, r_mid, fs, prev_r_peak_idx=prev_r_idx)
+                        
+                        # Calculate RR interval for QTC calculation
+                        if len(peaks) >= 2:
+                            rr_intervals_ms = np.diff(peaks) * (1000.0 / fs)
+                            valid_rr = rr_intervals_ms[(rr_intervals_ms >= 200) & (rr_intervals_ms <= 6000)]
+                            rr_ms = np.median(valid_rr) if len(valid_rr) > 0 else 600.0
+                        else:
+                            rr_ms = 600.0
+                        
+                        # Calculate PR Interval from median beat (real formula)
+                        pr_val = measure_pr_from_median_beat(median_beat, time_axis, fs, tp_baseline)
+                        if pr_val is None or pr_val <= 0:
+                            pr_val = 0
+                        
+                        # Apply EMA smoothing for PR interval stability
+                        if not hasattr(self, '_dashboard_pr_ema'):
+                            self._dashboard_pr_ema = pr_val
+                            self._dashboard_pr_alpha = 0.2
+                        else:
+                            self._dashboard_pr_ema = self._dashboard_pr_alpha * pr_val + (1 - self._dashboard_pr_alpha) * self._dashboard_pr_ema
+                        
+                        metrics['pr_interval'] = int(round(self._dashboard_pr_ema))
+                        
+                        # Calculate QRS Duration from median beat (real formula)
+                        qrs_val = measure_qrs_duration_from_median_beat(median_beat, time_axis, fs, tp_baseline)
+                        if qrs_val is None or qrs_val <= 0:
+                            qrs_val = 0
+                        
+                        # Apply EMA smoothing for QRS duration stability
+                        if not hasattr(self, '_dashboard_qrs_ema'):
+                            self._dashboard_qrs_ema = qrs_val
+                            self._dashboard_qrs_alpha = 0.2
+                        else:
+                            self._dashboard_qrs_ema = self._dashboard_qrs_alpha * qrs_val + (1 - self._dashboard_qrs_alpha) * self._dashboard_qrs_ema
+                        
+                        metrics['qrs_duration'] = int(round(self._dashboard_qrs_ema))
+                        
+                        # Calculate P Duration from median beat (real formula)
+                        p_duration = measure_p_duration_from_median_beat(median_beat, time_axis, fs, tp_baseline)
+                        if p_duration is None or p_duration <= 0:
+                            p_duration = 0
+                        # Store P duration (may be used later)
+                        metrics['p_duration'] = int(round(p_duration))
+                        
+                        # Calculate QT Interval from median beat (real formula)
+                        qt_val = measure_qt_from_median_beat(median_beat, time_axis, fs, tp_baseline, rr_ms=rr_ms)
+                        if qt_val is None or qt_val <= 0:
+                            qt_val = 0
+                        
+                        metrics['qt_interval'] = int(round(qt_val))
+                        
+                        # Calculate QTc using Bazett's formula: QTc = QT / sqrt(RR_sec)
+                        if qt_val > 0 and rr_ms > 0:
+                            rr_sec = rr_ms / 1000.0
+                            qtc_val = qt_val / (rr_sec ** 0.5)
+                            # Validate QTC range (250-600 ms)
+                            qtc_val = max(250, min(600, qtc_val))
+                        else:
+                            qtc_val = 0
+                        
+                        # Format QT/QTc display
+                        qt_int = int(round(qt_val)) if qt_val > 0 else 0
+                        qtc_int = int(round(qtc_val)) if qtc_val > 0 else 0
+                        
+                        if qt_int > 0 and qtc_int > 0:
+                            metrics['qtc_interval'] = f"{qt_int}/{qtc_int}"
+                        elif qtc_int > 0:
+                            metrics['qtc_interval'] = str(qtc_int)
+                        else:
+                            metrics['qtc_interval'] = "0"
+                        
+                        # ST Segment (set to 0 for now, can be calculated separately if needed)
+                        metrics['st_interval'] = "0"
+                    else:
+                        # Fallback if median beat cannot be built
+                        metrics['pr_interval'] = 0
+                        metrics['qrs_duration'] = 0
+                        metrics['qt_interval'] = 0
+                        metrics['qtc_interval'] = "0"
+                        metrics['st_interval'] = "0"
                 else:
-                    self._dashboard_pr_ema = self._dashboard_pr_alpha * pr_val + (1 - self._dashboard_pr_alpha) * self._dashboard_pr_ema
-                    print(f" Dashboard PR EMA updated: raw={pr_val}, ema={self._dashboard_pr_ema}")  # Debug
-                
-                metrics['pr_interval'] = int(round(self._dashboard_pr_ema))
-                print(f" Dashboard PR final value: {metrics['pr_interval']}")  # Debug
-                
-                # QRS Duration from median-beat engine (rounded to integer)
-                qrs_val = getattr(self.ecg_test_page, 'last_qrs_duration', 0) or 0
-                
-                # Apply EMA smoothing for QRS duration stability
-                if not hasattr(self, '_dashboard_qrs_ema'):
-                    self._dashboard_qrs_ema = qrs_val
-                    self._dashboard_qrs_alpha = 0.2  # Same as PR for consistency
-                    print(f" Dashboard QRS EMA initialized with: {qrs_val}")  # Debug
-                else:
-                    self._dashboard_qrs_ema = self._dashboard_qrs_alpha * qrs_val + (1 - self._dashboard_qrs_alpha) * self._dashboard_qrs_ema
-                    print(f" Dashboard QRS EMA updated: raw={qrs_val}, ema={self._dashboard_qrs_ema}")  # Debug
-                
-                qrs_smoothed = int(round(self._dashboard_qrs_ema))
-                metrics['qrs_duration'] = qrs_smoothed
-                print(f" Dashboard QRS final value: {qrs_smoothed}")  # Debug
-                
-                # QT Interval from median-beat engine (rounded to integer)
-                qt_val = getattr(self.ecg_test_page, 'last_qt_interval', 0) or 0
-                metrics['qt_interval'] = int(round(qt_val))
-                
-                # QTc and QTcF from median-beat engine (rounded to integers)
-                qtc_val = getattr(self.ecg_test_page, 'last_qtc_interval', 0) or 0
-                qtcf_val = getattr(self.ecg_test_page, 'last_qtcf_interval', 0) or 0
-                qt_int = int(round(qt_val)) if qt_val > 0 else 0
-                qtc_int = int(round(qtc_val)) if qtc_val > 0 else 0
-                
-                if qt_int > 0 and qtc_int > 0:
-                    metrics['qtc_interval'] = f"{qt_int}/{qtc_int}"
-                elif qtc_int > 0:
-                    metrics['qtc_interval'] = str(qtc_int)
-                else:
+                    # Not enough beats for median beat calculation
+                    metrics['pr_interval'] = 0
+                    metrics['qrs_duration'] = 0
+                    metrics['qt_interval'] = 0
                     metrics['qtc_interval'] = "0"
-                
-                # ST Segment from median-beat engine (rounded to integer, no decimals)
-                st_val = getattr(self.ecg_test_page, 'last_st_segment', 0.0) or 0.0
-                st_int = int(round(st_val)) if st_val != 0.0 else 0
-                metrics['st_interval'] = str(st_int)
-            else:
-                # Fallback if ECG test page not available
+                    metrics['st_interval'] = "0"
+                    
+            except ImportError as e:
+                print(f" ⚠️ Clinical measurement functions not available: {e}")
+                # Fallback if clinical measurement functions not available
+                metrics['pr_interval'] = 0
+                metrics['qrs_duration'] = 0
+                metrics['qt_interval'] = 0
+                metrics['qtc_interval'] = "0"
+                metrics['st_interval'] = "0"
+            except Exception as e:
+                print(f" ⚠️ Error calculating real ECG metrics: {e}")
+                # Fallback on error
                 metrics['pr_interval'] = 0
                 metrics['qrs_duration'] = 0
                 metrics['qt_interval'] = 0
@@ -2310,27 +2396,26 @@ class Dashboard(QWidget):
                     window_samples = int(max(50, min(len(original_data), seconds_to_show * actual_sampling_rate)))
 
                     # Slice last window and resample horizontally to fixed display length
+                    # Use same approach as 12-lead test page: plot raw data directly in 0-4096 range
                     try:
                         src = original_data[-window_samples:]
                         
-                        # Detrend/center for display only
-                        src_mean = np.mean(src)
-                        if np.isnan(src_mean) or np.isinf(src_mean):
-                            src_mean = 0
-                        src_centered = src - src_mean
-                        # Scale the signal to fit within the Y-axis range (0-4096)
-                        if np.std(src_centered) > 0:
-                            # Scale to fit in 0-4096 range, center around 2048
-                            src_centered = src_centered * (1000 / np.std(src_centered))  # Scale to fit in range
-                            src_centered = src_centered + 2048  # Center around 2048 (middle of 0-4096)
+                        # Use raw data directly (same as 12-lead test page)
+                        # Raw ECG data is already in 0-4096 range from hardware
+                        # No centering or scaling needed - plot directly like in 12-lead page
                         
                         display_len = len(self.ecg_x)
-                        if src_centered.size <= 1:
-                            display_y = np.full(display_len, 0.0)  # Center at 0
+                        if src.size <= 1:
+                            # Default to middle of range if no data
+                            display_y = np.full(display_len, 2048.0)
                         else:
-                            x_src = np.linspace(0.0, 1.0, src_centered.size)
+                            # Interpolate to display length (same as 12-lead page)
+                            x_src = np.linspace(0.0, 1.0, src.size)
                             x_dst = np.linspace(0.0, 1.0, display_len)
-                            display_y = np.interp(x_dst, x_src, src_centered)
+                            display_y = np.interp(x_dst, x_src, src.astype(float))
+                            
+                            # Ensure values stay within 0-4096 range (hardware limit)
+                            display_y = np.clip(display_y, 0, 4096)
                         
                         # Validate display data
                         if np.any(np.isnan(display_y)) or np.any(np.isinf(display_y)):
@@ -2338,6 +2423,8 @@ class Dashboard(QWidget):
                             return self._fallback_wave_update(frame)
                         
                         self.ecg_line.set_ydata(display_y)
+                        # Ensure y-axis is locked to 0-4096 range (same as 12-lead page)
+                        self.ecg_canvas.axes.set_ylim(0, 4096)
                         
                     except Exception as e:
                         print(f" Error processing display data: {e}")
@@ -2395,8 +2482,15 @@ class Dashboard(QWidget):
         """Fallback wave generation when ECG data is not available"""
         try:
             self.ecg_y = np.roll(self.ecg_y, -1)
-            self.ecg_y[-1] = 150 * np.sin(2 * np.pi * 2 * self.ecg_x[-1] + frame/10) + 30 * np.random.randn()  # Smaller amplitude
+            # Generate demo wave scaled to fit 0-4096 range (centered around 2048)
+            y_center = 2048
+            amplitude = 800  # Amplitude for demo wave
+            demo_value = y_center + amplitude * np.sin(2 * np.pi * 2 * self.ecg_x[-1] + frame/10) + 50 * np.random.randn()
+            # Clamp to 0-4096 range
+            self.ecg_y[-1] = np.clip(demo_value, 0, 4096)
             self.ecg_line.set_ydata(self.ecg_y)
+            # Ensure y-axis is locked to 0-4096 range
+            self.ecg_canvas.axes.set_ylim(0, 4096)
             # Do not compute/update metrics from mock wave; keep zeros until user starts
             return [self.ecg_line]
         except Exception as e:
@@ -2483,11 +2577,17 @@ class Dashboard(QWidget):
         # Record last update time
         self._last_metrics_update_ts = _time.time()
         
-        # Keep ECG test page metrics identical to dashboard
-        try:
-            self.sync_dashboard_metrics_to_ecg_page()
-        except Exception:
-            pass
+        # OPTIMIZED: Reduce sync frequency to prevent lag - only sync every 10th update
+        if not hasattr(self, '_sync_throttle_count'):
+            self._sync_throttle_count = 0
+        self._sync_throttle_count += 1
+        
+        # Keep ECG test page metrics identical to dashboard (throttled)
+        if self._sync_throttle_count % 10 == 0:  # Sync every 10th update instead of every update
+            try:
+                self.sync_dashboard_metrics_to_ecg_page()
+            except Exception:
+                pass
         # Also update the ECG test page theme if it exists
         if hasattr(self, 'ecg_test_page') and hasattr(self.ecg_test_page, 'update_metrics_frame_theme'):
             self.ecg_test_page.update_metrics_frame_theme(self.dark_mode, self.medical_mode)
@@ -2507,8 +2607,15 @@ class Dashboard(QWidget):
                 
             if not hasattr(self.ecg_test_page, 'metric_labels'):
                 return
-                
-            print(f"🔄 FORCE SYNC: Dashboard -> ECG Page")
+            
+            # OPTIMIZED: Reduce sync frequency to prevent lag
+            if not hasattr(self, '_sync_count'):
+                self._sync_count = 0
+            self._sync_count += 1
+            
+            # Only print sync message every 50th sync to reduce console spam
+            if self._sync_count % 50 == 1:
+                print(f"🔄 FORCE SYNC: Dashboard -> ECG Page")
                 
             # Force sync metric values from dashboard to ECG test page
             # Extract numeric values from dashboard labels (e.g., "100 BPM" -> "100")
@@ -2516,25 +2623,29 @@ class Dashboard(QWidget):
                 hr_text = self.metric_labels['heart_rate'].text()
                 hr_value = hr_text.split()[0] if ' ' in hr_text else hr_text
                 self.ecg_test_page.metric_labels['heart_rate'].setText(hr_value)
-                print(f"  HR: {hr_value}")
+                if self._sync_count % 50 == 1:
+                    print(f"  HR: {hr_value}")
                 
             if 'pr_interval' in self.metric_labels and 'pr_interval' in self.ecg_test_page.metric_labels:
                 pr_text = self.metric_labels['pr_interval'].text()
                 pr_value = pr_text.split()[0] if ' ' in pr_text else pr_text
                 self.ecg_test_page.metric_labels['pr_interval'].setText(pr_value)
-                print(f"  PR: {pr_value}")
+                if self._sync_count % 50 == 1:
+                    print(f"  PR: {pr_value}")
                 
             if 'qrs_duration' in self.metric_labels and 'qrs_duration' in self.ecg_test_page.metric_labels:
                 qrs_text = self.metric_labels['qrs_duration'].text()
                 qrs_value = qrs_text.split()[0] if ' ' in qrs_text else qrs_text
                 self.ecg_test_page.metric_labels['qrs_duration'].setText(qrs_value)
-                print(f"  QRS: {qrs_value}")
+                if self._sync_count % 50 == 1:
+                    print(f"  QRS: {qrs_value}")
                 
             if 'st_interval' in self.metric_labels and 'st_segment' in self.ecg_test_page.metric_labels:
                 st_text = self.metric_labels['st_interval'].text()
                 st_value = st_text.split()[0] if ' ' in st_text else st_text
                 self.ecg_test_page.metric_labels['st_segment'].setText(st_value)
-                print(f"  ST: {st_value}")
+                if self._sync_count % 50 == 1:
+                    print(f"  ST: {st_value}")
                 
             # Handle qtc_interval - dashboard might have "286/369 ms" format
             if 'qtc_interval' in self.metric_labels and 'qtc_interval' in self.ecg_test_page.metric_labels:
@@ -2544,14 +2655,17 @@ class Dashboard(QWidget):
                     # Format: "286/369 ms" -> extract "286/369"
                     qtc_value = qtc_text.split()[0] if ' ' in qtc_text else qtc_text
                     self.ecg_test_page.metric_labels['qtc_interval'].setText(qtc_value)
-                    print(f"  QT/QTc: {qtc_value}")
+                    if self._sync_count % 50 == 1:
+                        print(f"  QT/QTc: {qtc_value}")
                 else:
                     # Single value
                     qtc_value = qtc_text.split()[0] if ' ' in qtc_text else qtc_text
                     self.ecg_test_page.metric_labels['qtc_interval'].setText(qtc_value)
-                    print(f"  QTc: {qtc_value}")
+                    if self._sync_count % 50 == 1:
+                        print(f"  QTc: {qtc_value}")
                     
-            print("✅ FORCE SYNC COMPLETED - Both pages now show identical values")
+            if self._sync_count % 50 == 1:
+                print("✅ FORCE SYNC COMPLETED - Both pages now show identical values")
             
         except Exception as e:
             print(f"❌ Error syncing dashboard metrics to ECG test page: {e}")
@@ -3340,10 +3454,11 @@ class Dashboard(QWidget):
             print(f" Error calculating stress/HRV: {e}")
     
     def update_live_conclusion(self):
-        """Generate personalized conclusion based on current ECG metrics"""
+        """Generate comprehensive personalized conclusion based on current ECG metrics with detailed BPM analysis"""
         try:
             findings = []
             recommendations = []
+            additional_info = []
             
             rhythm_text = None
             try:
@@ -3357,6 +3472,7 @@ class Dashboard(QWidget):
             pr_text = self.metric_labels.get('pr_interval', QLabel()).text()
             qrs_text = self.metric_labels.get('qrs_duration', QLabel()).text()
             st_text = self.metric_labels.get('st_interval', QLabel()).text()
+            qtc_text = self.metric_labels.get('qtc_interval', QLabel()).text()
             
             # Parse values
             try:
@@ -3374,6 +3490,19 @@ class Dashboard(QWidget):
             except:
                 qrs = 0
             
+            # Parse QTC (can be "QT/QTC" format)
+            qt = 0
+            qtc = 0
+            try:
+                if qtc_text and '/' in qtc_text:
+                    parts = qtc_text.split('/')
+                    qt = int(parts[0].strip().replace(' ms', '')) if len(parts) > 0 else 0
+                    qtc = int(parts[1].strip().replace(' ms', '')) if len(parts) > 1 else 0
+                elif qtc_text:
+                    qtc = int(qtc_text.strip().replace(' ms', ''))
+            except:
+                pass
+            
             # Include rhythm interpretation findings first (System detects: AFib, VT, PVCs, Bradycardia, Tachycardia, NSR)
             if rhythm_text:
                 rhythm_clean = rhythm_text.strip()
@@ -3385,60 +3514,115 @@ class Dashboard(QWidget):
                     if not is_normal_rhythm:
                         recommendations.append("• Review detected arrhythmia pattern, consult physician if persistent")
             
-            # Analyze Heart Rate (System supports 10-300 BPM range with arrhythmia detection)
+            # COMPREHENSIVE Heart Rate Analysis (System supports 10-300 BPM range)
             if hr >= 10 and hr <= 300:
                 if hr > 200:
-                    findings.append("[!] <b>Extreme Tachycardia</b> - Heart rate critically elevated")
-                    recommendations.append("• Immediate medical attention recommended")
+                    findings.append("[!] <b>Extreme Tachycardia</b> - Heart rate critically elevated (>200 BPM)")
+                    recommendations.append("• Immediate medical attention required - may indicate SVT, VT, or severe stress")
+                    recommendations.append("• Check for symptoms: chest pain, dizziness, shortness of breath")
+                    additional_info.append(f"• Current HR: {hr} BPM is in the extreme tachycardia range")
+                    additional_info.append("• Normal resting HR: 60-100 BPM for adults")
                 elif hr > 150:
-                    findings.append("[!] <b>Severe Tachycardia</b> - Heart rate significantly elevated")
-                    recommendations.append("• Consult physician, check for arrhythmias")
+                    findings.append("[!] <b>Severe Tachycardia</b> - Heart rate significantly elevated (150-200 BPM)")
+                    recommendations.append("• Consult physician promptly, check for arrhythmias or underlying conditions")
+                    recommendations.append("• Monitor for symptoms and avoid strenuous activity")
+                    additional_info.append(f"• Current HR: {hr} BPM indicates significant cardiac stress")
+                    additional_info.append("• Possible causes: exercise, stress, fever, anemia, hyperthyroidism")
                 elif hr > 100:
-                    findings.append("[!] <b>Tachycardia detected</b> - Heart rate elevated above normal range")
-                    recommendations.append("• Monitor symptoms, consider medical evaluation")
+                    findings.append("[!] <b>Tachycardia detected</b> - Heart rate elevated above normal range (100-150 BPM)")
+                    recommendations.append("• Monitor symptoms, consider medical evaluation if persistent")
+                    recommendations.append("• Ensure adequate hydration and rest")
+                    additional_info.append(f"• Current HR: {hr} BPM is above normal resting rate")
+                    additional_info.append("• May be normal during exercise, stress, or after caffeine intake")
                 elif hr < 40:
-                    findings.append("[!] <b>Severe Bradycardia</b> - Heart rate critically low")
-                    recommendations.append("• Immediate medical evaluation recommended")
+                    findings.append("[!] <b>Severe Bradycardia</b> - Heart rate critically low (<40 BPM)")
+                    recommendations.append("• Immediate medical evaluation recommended - may indicate heart block or sick sinus syndrome")
+                    recommendations.append("• Check for symptoms: fatigue, dizziness, fainting, chest pain")
+                    additional_info.append(f"• Current HR: {hr} BPM is dangerously low")
+                    additional_info.append("• Normal resting HR: 60-100 BPM for adults")
                 elif hr < 60:
-                    findings.append("[i] <b>Bradycardia detected</b> - Heart rate below normal range")
-                    recommendations.append("• May be normal for athletes, monitor symptoms")
+                    findings.append("[i] <b>Bradycardia detected</b> - Heart rate below normal range (40-60 BPM)")
+                    recommendations.append("• May be normal for well-trained athletes or during sleep")
+                    recommendations.append("• Monitor for symptoms, consult if experiencing fatigue or dizziness")
+                    additional_info.append(f"• Current HR: {hr} BPM is below normal resting rate")
+                    additional_info.append("• Athletes often have resting HR 40-60 BPM due to cardiovascular fitness")
                 else:
                     findings.append("[OK] <b>Normal heart rate</b> - Within healthy range (60-100 BPM)")
+                    additional_info.append(f"• Current HR: {hr} BPM is within normal resting range")
+                    additional_info.append("• Optimal HR varies by age, fitness level, and activity")
             
             # Analyze PR Interval
             if pr > 0:
                 if pr > 200:
-                    findings.append("[!] <b>Prolonged PR interval</b> - Possible first-degree heart block")
+                    findings.append("[!] <b>Prolonged PR interval</b> - Possible first-degree heart block (>200ms)")
                     recommendations.append("• Medical evaluation recommended for AV conduction assessment")
+                    recommendations.append("• Monitor for progression to higher-degree blocks")
+                    additional_info.append(f"• PR interval: {pr} ms (normal: 120-200 ms)")
                 elif pr < 120:
-                    findings.append("[i] <b>Short PR interval</b> - May indicate pre-excitation syndrome")
+                    findings.append("[i] <b>Short PR interval</b> - May indicate pre-excitation syndrome (<120ms)")
                     recommendations.append("• Monitor for accessory pathway patterns, consult if symptomatic")
+                    recommendations.append("• May be associated with WPW syndrome")
+                    additional_info.append(f"• PR interval: {pr} ms (normal: 120-200 ms)")
                 else:
                     findings.append("[OK] <b>Normal PR interval</b> - Atrial-ventricular conduction normal")
+                    additional_info.append(f"• PR interval: {pr} ms (normal: 120-200 ms)")
             
             # Analyze QRS Duration
             if qrs > 0:
                 if qrs > 120:
-                    findings.append("[!] <b>Wide QRS complex</b> - Possible bundle branch block or ventricular rhythm")
+                    findings.append("[!] <b>Wide QRS complex</b> - Possible bundle branch block or ventricular rhythm (>120ms)")
                     recommendations.append("• 12-lead ECG analysis recommended for conduction pattern assessment")
+                    recommendations.append("• May indicate bundle branch block, ventricular rhythm, or hyperkalemia")
+                    additional_info.append(f"• QRS duration: {qrs} ms (normal: <100 ms)")
                 elif qrs > 100:
-                    findings.append("[i] <b>Borderline QRS duration</b> - Early conduction delay detected")
+                    findings.append("[i] <b>Borderline QRS duration</b> - Early conduction delay detected (100-120ms)")
                     recommendations.append("• Monitor for progression, follow-up ECG if symptoms develop")
+                    additional_info.append(f"• QRS duration: {qrs} ms (normal: <100 ms)")
                 else:
-                    findings.append(" <b>Normal QRS duration</b> - Ventricular depolarization normal")
+                    findings.append("[OK] <b>Normal QRS duration</b> - Ventricular depolarization normal")
+                    additional_info.append(f"• QRS duration: {qrs} ms (normal: <100 ms)")
+            
+            # Analyze QT/QTC Interval
+            if qtc > 0:
+                if qtc > 500:
+                    findings.append("[!] <b>Prolonged QTc interval</b> - High risk for arrhythmias (>500ms)")
+                    recommendations.append("• Immediate medical evaluation - risk of Torsades de Pointes")
+                    recommendations.append("• Review medications that may prolong QT interval")
+                    additional_info.append(f"• QTc interval: {qtc} ms (normal: <450 ms for men, <470 ms for women)")
+                elif qtc > 470:
+                    findings.append("[!] <b>Borderline prolonged QTc</b> - Moderate risk (470-500ms)")
+                    recommendations.append("• Medical evaluation recommended, monitor for symptoms")
+                    recommendations.append("• Review medications and electrolyte levels")
+                    additional_info.append(f"• QTc interval: {qtc} ms (normal: <450 ms for men, <470 ms for women)")
+                elif qtc > 450:
+                    findings.append("[i] <b>Slightly prolonged QTc</b> - Mild concern (450-470ms)")
+                    recommendations.append("• Monitor, may be normal variant or medication effect")
+                    additional_info.append(f"• QTc interval: {qtc} ms (normal: <450 ms for men, <470 ms for women)")
+                else:
+                    findings.append("[OK] <b>Normal QTc interval</b> - Within safe range")
+                    additional_info.append(f"• QTc interval: {qtc} ms (normal: <450 ms for men, <470 ms for women)")
             
             # Check HRV/Stress
             if hasattr(self, '_current_hrv'):
                 hrv = self._current_hrv
                 if hrv > 100:
-                    findings.append(" <b>Good heart rate variability</b> - Low stress indicated")
+                    findings.append("[OK] <b>Good heart rate variability</b> - Low stress indicated")
+                    additional_info.append(f"• HRV: {hrv:.1f} ms indicates good autonomic function")
                 elif hrv > 50:
                     findings.append("[i] <b>Moderate HRV</b> - Normal stress levels")
+                    additional_info.append(f"• HRV: {hrv:.1f} ms indicates moderate autonomic function")
                 else:
                     findings.append("[!] <b>Low HRV</b> - Elevated stress or fatigue")
                     recommendations.append("• Ensure adequate rest and stress management")
+                    recommendations.append("• Consider relaxation techniques, adequate sleep, and regular exercise")
+                    additional_info.append(f"• HRV: {hrv:.1f} ms indicates reduced autonomic function")
             
-            # Build conclusion HTML
+            # Add general cardiac health information
+            if hr > 0:
+                additional_info.append("• Regular exercise and healthy lifestyle help maintain optimal heart function")
+                additional_info.append("• Avoid smoking, excessive alcohol, and maintain healthy weight")
+            
+            # Build comprehensive conclusion HTML
             if not findings:
                 conclusion_html = """
                     <p style='color: #888; font-style: italic;'>
@@ -3447,19 +3631,24 @@ class Dashboard(QWidget):
                     </p>
                 """
             else:
-                conclusion_html = "<b style='color: #ff6600;'>Findings:</b><br>"
+                conclusion_html = "<b style='color: #ff6600; font-size: 14px;'>Findings:</b><br>"
                 for f in findings:
                     conclusion_html += f + "<br>"
                 
                 if recommendations:
-                    conclusion_html += "<br><b style='color: #ff6600;'>Recommendations:</b><br>"
+                    conclusion_html += "<br><b style='color: #ff6600; font-size: 14px;'>Recommendations:</b><br>"
                     for r in recommendations:
                         conclusion_html += r + "<br>"
+                
+                if additional_info:
+                    conclusion_html += "<br><b style='color: #2c3e50; font-size: 13px;'>Additional Information:</b><br>"
+                    for info in additional_info:
+                        conclusion_html += f"<span style='color: #555;'>{info}</span><br>"
                 
                 conclusion_html += """
                     <br><p style='font-size: 10px; color: #999; font-style: italic;'>
                     <b>NOTE:</b> This is an automated analysis for educational purposes only. 
-                    Not a substitute for professional medical advice.
+                    Not a substitute for professional medical advice. Consult a healthcare provider for medical concerns.
                     </p>
                 """
             

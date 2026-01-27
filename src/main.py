@@ -567,7 +567,7 @@ class LoginRegisterDialog(QDialog):
             QMessageBox.warning(self, "Error", msg)
             return
         
-        # Upload user signup details to cloud
+        # Upload user signup details to cloud with all patient information
         try:
             from utils.cloud_uploader import get_cloud_uploader
             from datetime import datetime
@@ -581,6 +581,8 @@ class LoginRegisterDialog(QDialog):
                 'phone': phone,
                 'address': address,
                 'serial_number': serial_id,
+                'serial_id': serial_id,  # Include both for compatibility
+                'machine_serial_id': serial_id,  # Include machine serial ID
                 'registered_at': datetime.now().isoformat()
             }
             
