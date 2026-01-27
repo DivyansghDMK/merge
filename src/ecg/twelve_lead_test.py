@@ -2541,7 +2541,7 @@ class ECGTestPage(QWidget):
                     self._bpm_calc_debug_count = 0
                 self._bpm_calc_debug_count += 1
                 if self._bpm_calc_debug_count <= 5:
-                    print(f" Pratyaksh BPM Calculation: {heart_rate:.1f} BPM (sampling_rate={fs:.1f} Hz, median_RR={median_rr:.1f} ms, peaks={len(peaks)})")
+                    print(f" BPM Calculation: {heart_rate:.1f} BPM (sampling_rate={fs:.1f} Hz, median_RR={median_rr:.1f} ms, peaks={len(peaks)})")
                 # Extra guard: avoid falsely reporting very high BPM when real rate is very low
                 try:
                     window_sec = len(lead_data) / float(fs)
@@ -2725,7 +2725,7 @@ class ECGTestPage(QWidget):
                 return amplitudes
             
             # Get sampling rate - default to 250 Hz (unified fallback)
-            fs = 250.0
+            fs = 500.0
             if hasattr(self, 'sampler') and hasattr(self.sampler, 'sampling_rate') and self.sampler.sampling_rate > 10:
                 fs = float(self.sampler.sampling_rate)
             
@@ -5560,6 +5560,8 @@ class ECGTestPage(QWidget):
             
         if self.serial_reader:
             self.serial_reader.stop()
+            self.serial_reader.close()
+            self.serial_reader = None
         self.timer.stop()
         if hasattr(self, '_12to1_timer'):
             self._12to1_timer.stop()
@@ -5906,10 +5908,27 @@ class ECGTestPage(QWidget):
             traceback.print_exc()
 
     def generate_pdf_report(self):
-        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        """Generate PDF report with format selection dropdown"""
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox, QInputDialog
         import datetime, os, json, shutil
-        from ecg.ecg_report_generator import generate_ecg_report
-
+        
+        # Select report format first
+        formats = ["12:1 Portrait", "4:3 Landscape", "6:2 Landscape"]
+        format_name, ok = QInputDialog.getItem(self, "Select Format", "Choose ECG Report Format:", formats, 0, False)
+        if not ok:
+            return
+        
+        # Determine selected format
+        if "4:3" in format_name:
+            fmt = "4_3"
+        elif "6:2" in format_name:
+            fmt = "6_2"
+        else:
+            fmt = "12_1"
+        
+        # Store format for success message
+        self.selected_format = fmt
+        
         # Capture last 10 seconds of live ECG data
         lead_img_paths = {}
         ordered_leads = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
@@ -5939,11 +5958,12 @@ class ECGTestPage(QWidget):
                         recent_data = lead_data[-data_points_10_sec:]
                     else:
                         recent_data = lead_data
-                    
+
                     if len(recent_data) > 0:
                         # Create a clean plot for the report
                         import matplotlib.pyplot as plt
                         import matplotlib
+                        import numpy as np
                         matplotlib.use('Agg')  # Use non-interactive backend
                         
                         fig, ax = plt.subplots(figsize=(8, 2))
@@ -5969,10 +5989,10 @@ class ECGTestPage(QWidget):
                         
                         # Save the image
                         img_path = os.path.join(project_root, f"lead_{lead}_10sec.png")
-                        fig.savefig(img_path, 
-                                  bbox_inches='tight', 
-                                  pad_inches=0.1, 
-                                  dpi=150, 
+                        fig.savefig(img_path,
+                                  bbox_inches='tight',
+                                  pad_inches=0.1,
+                                  dpi=150,
                                   facecolor='white',
                                   edgecolor='none')
                         
@@ -5987,12 +6007,12 @@ class ECGTestPage(QWidget):
                     print(f"  Error capturing Lead {lead}: {e}")
             else:
                 print(f"  Lead {lead} not available (index {i})")
-
+        
         # Ask user for destination
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Save ECG Report",
-            f"ECG_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            f"ECG_Report_{fmt.replace(':', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             "PDF Files (*.pdf)"
         )
         if not filename:
@@ -6001,7 +6021,7 @@ class ECGTestPage(QWidget):
         try:
             import re
             ecg_data = {"HR": 0, "beat": 0, "PR": 0, "QRS": 0, "QT": 0, "QTc": 0, "ST": 0, "HR_max": 0, "HR_min": 0, "HR_avg": 0}
-
+            
             # Try to mirror dashboard metrics so both reports match
             dashboard_ref = None
             try:
@@ -6031,7 +6051,7 @@ class ECGTestPage(QWidget):
                 qtc = getattr(self, 'last_qtc_interval', 0)
                 qtcf = getattr(self, 'last_qtcf_interval', 0)
                 st = getattr(self, 'last_st_segment', 0.0)
-
+                
                 # If clinical values not available, try to extract from UI labels
                 if hr == 0:
                     ml = dashboard_ref.metric_labels
@@ -6086,18 +6106,77 @@ class ECGTestPage(QWidget):
                 patient = {}
             patient["date_time"] = now_str
 
-            # Generate report with patient details
-            generate_ecg_report(filename, ecg_data, lead_img_paths, None, self, patient)
+            # Load appropriate report generator based on format
+            if fmt == "4_3":
+                # Use 4:3 specific report generator
+                import importlib.util
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                module_file = os.path.join(current_dir, "4_3_ecg_report_generator.py")
+                
+                if os.path.exists(module_file):
+                    spec = importlib.util.spec_from_file_location("ecg_4_3_generator", module_file)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    
+                    # Find the generate function
+                    gen = None
+                    for name in ("generate_4_3_ecg_report", "generate_ecg_report"):
+                        if hasattr(mod, name):
+                            gen = getattr(mod, name)
+                            break
+                    
+                    if gen:
+                        gen(filename, ecg_data, lead_img_paths, None, self, patient)
+                    else:
+                        raise RuntimeError("No generate function found in 4_3_ecg_report_generator.py")
+                else:
+                    raise FileNotFoundError("4_3_ecg_report_generator.py not found")
+                    
+            elif fmt == "6_2":
+                # Use 6:2 specific report generator
+                import importlib.util
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                module_file = os.path.join(current_dir, "6_2_ecg_report_generator.py")
+                
+                if os.path.exists(module_file):
+                    spec = importlib.util.spec_from_file_location("ecg_6_2_generator", module_file)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    
+                    # Find the generate function
+                    gen = None
+                    for name in ("generate_6_2_ecg_report", "generate_ecg_report"):
+                        if hasattr(mod, name):
+                            gen = getattr(mod, name)
+                            break
+                    
+                    if gen:
+                        gen(filename, ecg_data, lead_img_paths, None, self, patient)
+                    else:
+                        raise RuntimeError("No generate function found in 6_2_ecg_report_generator.py")
+                else:
+                    raise FileNotFoundError("6_2_ecg_report_generator.py not found")
+                    
+            else:
+                # Use standard 12:1 report generator
+                from ecg.ecg_report_generator import generate_ecg_report
+                generate_ecg_report(filename, ecg_data, lead_img_paths, None, self, patient)
 
             # Append history
             try:
                 from dashboard.history_window import append_history_entry
-                append_history_entry(patient, filename, report_type="12 Lead")
+                append_history_entry(patient, filename, report_type=f"{fmt} Lead")
             except Exception:
                 import traceback
                 traceback.print_exc()
 
-            QMessageBox.information(self, "Success", f"ECG Report generated successfully!\nSaved as: {filename}")
+            # Show format-specific success message
+            if hasattr(self, 'selected_format') and self.selected_format == "4_3":
+                QMessageBox.information(self, "Success", f"4:3 ECG detection report saved successfully:\n{filename}")
+            elif hasattr(self, 'selected_format') and self.selected_format == "6_2":
+                QMessageBox.information(self, "Success", f"6:2 ECG detection report saved successfully:\n{filename}")
+            else:
+                QMessageBox.information(self, "Success", f"ECG Report generated successfully:\n{filename}")
 
             # Dual-save to app reports/ and update index.json
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -6281,6 +6360,16 @@ class ECGTestPage(QWidget):
 
     def go_back(self):
         """Go back to the dashboard"""
+        try:
+            if hasattr(self, 'demo_toggle') and self.demo_toggle.isChecked():
+                QMessageBox.information(
+                    self,
+                    "Demo Mode Enabled",
+                    "Please disable Demo Mode if you want to switch to the main dashboard."
+                )
+                return
+        except Exception:
+            pass
         if hasattr(self, '_overlay_active') and self._overlay_active:
             self._restore_original_layout()
 
@@ -6562,7 +6651,7 @@ class ECGTestPage(QWidget):
             seconds_to_show = baseline_seconds * seconds_scale
             
             # Use hardware sampling rate
-            sampling_rate = 186.5
+            sampling_rate = 500.0
             if hasattr(self, 'sampler') and hasattr(self.sampler, 'sampling_rate') and self.sampler.sampling_rate > 10:
                 sampling_rate = float(self.sampler.sampling_rate)
             elif hasattr(self, 'sampling_rate') and self.sampling_rate > 10:
@@ -6638,8 +6727,8 @@ class ECGTestPage(QWidget):
                     # Optional AC notch filtering (match main 12-lead grid view)
                     filtered_segment = np.array(data_segment, dtype=float)
                     try:
-                        # Prefer hardware sampling rate; fall back to 186.5 Hz
-                        sampling_rate = 186.5
+                        # Prefer hardware sampling rate; fall back to 500.0 Hz
+                        sampling_rate = 500.0
                         try:
                             if hasattr(self, "sampler") and hasattr(self.sampler, "sampling_rate") and self.sampler.sampling_rate > 10:
                                 sampling_rate = float(self.sampler.sampling_rate)
@@ -6647,9 +6736,24 @@ class ECGTestPage(QWidget):
                                 sampling_rate = float(self.sampling_rate)
                         except Exception:
                             pass
-                        
+
+                        # EMG Filter
+                        emg_applied = False
+                        emg_suppresses_ac = False
+                        emg_setting = self.settings_manager.get_setting("filter_emg", "150") if hasattr(self, "settings_manager") else "150"
+                        if emg_setting and emg_setting.lower() != "off" and len(filtered_segment) >= 10:
+                            from ecg.ecg_filters import apply_emg_filter
+                            filtered_segment = apply_emg_filter(filtered_segment, sampling_rate, emg_setting)
+                            emg_applied = True
+                            try:
+                                if float(emg_setting) < 60:
+                                    emg_suppresses_ac = True
+                            except ValueError:
+                                pass
+
+                        # AC Filter
                         ac_setting = self.settings_manager.get_setting("filter_ac", "off") if hasattr(self, "settings_manager") else "off"
-                        if ac_setting and ac_setting != "off" and len(filtered_segment) >= 10:
+                        if (not emg_applied or not emg_suppresses_ac) and ac_setting and ac_setting != "off" and len(filtered_segment) >= 10:
                             from ecg.ecg_filters import apply_ac_filter
                             filtered_segment = apply_ac_filter(filtered_segment, sampling_rate, ac_setting)
                     except Exception as filter_error:
@@ -6819,7 +6923,7 @@ class ECGTestPage(QWidget):
             
             for line in self._overlay_lines:
                 line.set_color('#0066cc')
-                line.set_linewidth(1.5)
+                line.set_linewidth(0.7)
         
         elif mode == "dark":
             self.dark_mode_btn.setStyleSheet(active_button_style)
@@ -6841,7 +6945,7 @@ class ECGTestPage(QWidget):
             
             for line in self._overlay_lines:
                 line.set_color('#00ff00')
-                line.set_linewidth(1.5)
+                line.set_linewidth(0.7)
         
         elif mode == "graph":
             self.graph_mode_btn.setStyleSheet(active_button_style)
@@ -6856,6 +6960,16 @@ class ECGTestPage(QWidget):
             # Clear figure-level background
             if hasattr(self, '_overlay_canvas') and self._overlay_canvas.figure:
                 fig = self._overlay_canvas.figure
+                
+                # IMPORTANT: Clear grid lines created by graph mode
+                if hasattr(fig, '_grid_lines'):
+                    for line in fig._grid_lines:
+                        try:
+                            line.remove()
+                        except:
+                            pass
+                    fig._grid_lines = []
+                
                 if hasattr(fig, '_figure_background'):
                     try:
                         fig._figure_background.remove()
@@ -6880,93 +6994,133 @@ class ECGTestPage(QWidget):
                     ax.set_facecolor('none')
                     ax.patch.set_alpha(0.0)
                     
+                    # Disable any grid on axes
+                    ax.grid(False)
+                    
         except Exception as e:
             print(f"Error clearing backgrounds: {e}")
 
     def _apply_graph_mode(self):
-        
+        """
+        Apply graph mode with pink ECG grid lines drawn on the container background.
+        Adjust minor grid density for 12x1 vs 6x2 overlay modes.
+        """
         try:
-            import os
-            from PyQt5.QtGui import QPixmap
-            import matplotlib.image as mpimg
-            
-            bg_path = "ecg_pink_grid_fullpage.png"
-            if os.path.exists(bg_path):
-                # Load the background image
-                bg_img = QPixmap(bg_path)
-                if not bg_img.isNull():
-                    # Save temporary file for matplotlib
-                    temp_path = "temp_bg.png"
-                    bg_img.save(temp_path)
-                    bg_matplotlib = mpimg.imread(temp_path)
-                    
-                    # Apply background to the entire figure first
-                    if hasattr(self, '_overlay_canvas') and self._overlay_canvas.figure:
-                        fig = self._overlay_canvas.figure
-                        fig.patch.set_facecolor('#ffffff')  # White background for the figure
-                        
-                        # Remove any existing background from figure
-                        if hasattr(fig, '_figure_background'):
-                            try:
-                                fig._figure_background.remove()
-                            except:
-                                pass
-                        
-                        # Apply background image to the entire figure
-                        fig._figure_background = fig.figimage(
-                            bg_matplotlib, 
-                            xo=0, yo=0, 
-                            alpha=0.4,  # Slightly transparent so waves are visible
-                            zorder=0
-                        )
-                    
-                    # Apply background to all axes
-                    for i, ax in enumerate(self._overlay_axes):
-                        # Set transparent background for subplots
-                        ax.set_facecolor('none')
-                        ax.patch.set_alpha(0.0)
-                        
-                        # Remove all borders and spines
-                        for spine in ax.spines.values():
-                            spine.set_visible(False)
-                        
-                        # Remove ticks for cleaner look
-                        ax.set_xticks([])
-                        ax.set_yticks([])
-                        
-                        # Set label color to dark for better visibility on grid background
-                        ax.set_ylabel(ax.get_ylabel(), color='#333333', fontsize=12, fontweight='bold', labelpad=12)
-                        
-                        # Set proper limits
-                        ax.set_xlim(0, self.buffer_size-1)
-                        ax.set_ylim(-500, 500)
-                    
-                    # Change line colors to dark red for better visibility on grid background
-                    for line in self._overlay_lines:
-                        line.set_color('#cc0000')  # Darker red
-                        line.set_linewidth(1.5)
-                        line.set_alpha(1.0)
-                    
-                    # Clean up temporary file
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                    
-                    # Force redraw
-                    if hasattr(self, '_overlay_canvas'):
-                        self._overlay_canvas.draw()
-                        
-                    return
-                        
-                else:
-                    print("Failed to load background image")
-                    return
+            from matplotlib.lines import Line2D
+
+            # Determine overlay mode and grid density
+            # expected values (adapt to your own attribute / naming):
+            # self._overlay_mode in {"12x1", "6x2"}
+            mode = getattr(self, "_overlay_mode", "12x1")
+
+            # These are *figure* coordinates (0–1). We just change spacing to
+            # better visually match the container layout.
+            if mode == "12x1":
+                # Long, narrow strip: more vertical lines, slightly fewer horizontals
+                x_step_minor = 0.01   # every 1%
+                y_step_minor = 0.02   # every 2%
+            elif mode == "6x2":
+                # More square-ish layout: same density both directions
+                x_step_minor = 0.01
+                y_step_minor = 0.01
             else:
-                print(f"Background image not found at: {bg_path}")
-                return
-                
+                # Fallback
+                x_step_minor = 0.01
+                y_step_minor = 0.01
+
+            # Set the outer container (overlay widget) background to light pink
+            if hasattr(self, '_overlay_widget'):
+                self._overlay_widget.setStyleSheet("""
+                    QWidget {
+                        background: #ffe4ec;
+                        border: 2px solid #ff6600;
+                        border-radius: 15px;
+                    }
+                """)
+
+            # Apply pink grid background to the figure using Line2D
+            if hasattr(self, '_overlay_canvas') and self._overlay_canvas.figure:
+                fig = self._overlay_canvas.figure
+
+                # Set figure background to light pink
+                fig.patch.set_facecolor('#ffe4ec')
+
+                # Remove any existing grid lines from figure
+                if hasattr(fig, '_grid_lines'):
+                    for line in fig._grid_lines:
+                        try:
+                            line.remove()
+                        except:
+                            pass
+                    fig._grid_lines = []
+
+                # Remove any existing background image from figure
+                if hasattr(fig, '_figure_background'):
+                    try:
+                        fig._figure_background.remove()
+                        delattr(fig, '_figure_background')
+                    except:
+                        pass
+
+                grid_lines = []
+
+                # We'll define "major" every 5 minor steps (approx, since step may not divide 1 exactly)
+                # and avoid drawing those here since you only asked to tune minor grid.
+                # If you later add majors, keep them consistent with these steps.
+                # Vertical minor lines
+                x = 0.0
+                idx = 0
+                while x <= 1.0 + 1e-9:
+                    if idx % 5 != 0:  # skip where major would go
+                        line = Line2D([x, x], [0, 1],
+                                    transform=fig.transFigure,
+                                    color='#ffb6c1', linewidth=0.3, alpha=0.7)
+                        fig.add_artist(line)
+                        grid_lines.append(line)
+                    x += x_step_minor
+                    idx += 1
+
+                # Horizontal minor lines
+                y = 0.0
+                idx = 0
+                while y <= 1.0 + 1e-9:
+                    if idx % 5 != 0:
+                        line = Line2D([0, 1], [y, y],
+                                    transform=fig.transFigure,
+                                    color='#ffb6c1', linewidth=0.3, alpha=0.7)
+                        fig.add_artist(line)
+                        grid_lines.append(line)
+                    y += y_step_minor
+                    idx += 1
+
+                fig._grid_lines = grid_lines
+
+            # Make all axes transparent
+            for i, ax in enumerate(self._overlay_axes):
+                ax.set_facecolor('none')
+                ax.patch.set_alpha(0.0)
+                ax.grid(False)
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_ylabel(ax.get_ylabel(), color='#333333',
+                            fontsize=12, fontweight='bold', labelpad=12)
+                ax.set_xlim(0, self.buffer_size - 1)
+                ax.set_ylim(-500, 500)
+
+            # ECG line style
+            for line in self._overlay_lines:
+                line.set_color('#800000')
+                line.set_linewidth(0.7)
+                line.set_alpha(1.0)
+                line.set_zorder(10)
+
+            if hasattr(self, '_overlay_canvas'):
+                self._overlay_canvas.draw()
+
         except Exception as e:
             print(f"Error applying graph mode: {e}")
-            return
 
     def _replace_plot_area_with_overlay(self):
         
@@ -7325,7 +7479,7 @@ class ECGTestPage(QWidget):
                     # Optional AC notch filtering (match main 12-lead grid view)
                     filtered_segment = np.array(data_segment, dtype=float)
                     try:
-                        sampling_rate = 186.5
+                        sampling_rate = 500.0
                         try:
                             if hasattr(self, "sampler") and hasattr(self.sampler, "sampling_rate") and self.sampler.sampling_rate > 10:
                                 sampling_rate = float(self.sampler.sampling_rate)
@@ -7333,9 +7487,24 @@ class ECGTestPage(QWidget):
                                 sampling_rate = float(self.sampler.sampling_rate)
                         except Exception:
                             pass
-                        
+
+                        # EMG Filter
+                        emg_applied = False
+                        emg_suppresses_ac = False
+                        emg_setting = self.settings_manager.get_setting("filter_emg", "150") if hasattr(self, "settings_manager") else "150"
+                        if emg_setting and emg_setting.lower() != "off" and len(filtered_segment) >= 10:
+                            from ecg.ecg_filters import apply_emg_filter
+                            filtered_segment = apply_emg_filter(filtered_segment, sampling_rate, emg_setting)
+                            emg_applied = True
+                            try:
+                                if float(emg_setting) < 60:
+                                    emg_suppresses_ac = True
+                            except ValueError:
+                                pass
+
+                        # AC Filter
                         ac_setting = self.settings_manager.get_setting("filter_ac", "off") if hasattr(self, "settings_manager") else "off"
-                        if ac_setting and ac_setting != "off" and len(filtered_segment) >= 10:
+                        if (not emg_applied or not emg_suppresses_ac) and ac_setting and ac_setting != "off" and len(filtered_segment) >= 10:
                             from ecg.ecg_filters import apply_ac_filter
                             filtered_segment = apply_ac_filter(filtered_segment, sampling_rate, ac_setting)
                     except Exception as filter_error:
@@ -7500,15 +7669,15 @@ class ECGTestPage(QWidget):
                                 lead_name = self.leads[i] if i < len(self.leads) else f"Lead {i+1}"
                                 if is_flat and not self._flatline_alert_shown[i]:
                                     self._flatline_alert_shown[i] = True
-                                    # try:
-                                    #     QMessageBox.warning(
-                                    #         self,
-                                    #         "Flatline Detected",
-                                    #         f"{lead_name} appears flat (no significant signal).\n"
-                                    #         "Please check the electrode/lead connection."
-                                    #     )
-                                    # except Exception as warn_err:
-                                    #     print(f" Flatline warning failed for {lead_name}: {warn_err}")
+                                    try:
+                                        QMessageBox.warning(
+                                            self,
+                                            "Flatline Detected",
+                                            f"{lead_name} appears flat (no significant signal).\n"
+                                            "Please check the electrode/lead connection."
+                                        )
+                                    except Exception as warn_err:
+                                        print(f" Flatline warning failed for {lead_name}: {warn_err}")
                                 elif not is_flat:
                                     # Reset flag when signal returns
                                     self._flatline_alert_shown[i] = False
@@ -7732,7 +7901,7 @@ class ECGTestPage(QWidget):
                             scaled_data = self.apply_adaptive_gain(self.data[i], signal_source, gain_factor)
 
                             # Build time axis and apply wave-speed scaling
-                            sampling_rate = 186.5
+                            sampling_rate = 500.0
                             if hasattr(self, 'sampler') and hasattr(self.sampler, 'sampling_rate') and self.sampler.sampling_rate > 10:
                                 sampling_rate = float(self.sampler.sampling_rate)
                             elif hasattr(self, 'sampling_rate') and self.sampling_rate > 10:
@@ -7816,9 +7985,28 @@ class ECGTestPage(QWidget):
                             
                             # Optional AC notch filtering based on "Set Filter" selection.
                             # Keeps wave peaks intact while removing 50/60 Hz power noise for machine serial data.
+
                             try:
+                                # EMG Filter
+                                emg_applied = False
+                                emg_suppresses_ac = False
+                                emg_setting = self.settings_manager.get_setting("filter_emg", "150") if self.settings_manager else "150"
+                                if emg_setting and emg_setting.lower() != "off" and len(filtered_slice) >= 10:
+                                    from ecg.ecg_filters import apply_emg_filter
+                                    filtered_slice = apply_emg_filter(filtered_slice, sampling_rate, emg_setting)
+                                    emg_applied = True
+                                    try:
+                                        if float(emg_setting) < 60:
+                                            emg_suppresses_ac = True
+                                    except ValueError:
+                                        pass
+                            except Exception as filter_error:
+                                pass  # EMG filter is optional
+
+                            try:
+                                # AC Filter
                                 ac_setting = self.settings_manager.get_setting("filter_ac", "off") if self.settings_manager else "off"
-                                if ac_setting and ac_setting != "off" and len(filtered_slice) >= 10:
+                                if (not emg_applied or not emg_suppresses_ac) and ac_setting and ac_setting != "off" and len(filtered_slice) >= 10:
                                     from ecg.ecg_filters import apply_ac_filter
                                     filtered_slice = apply_ac_filter(filtered_slice, sampling_rate, ac_setting)
                             except Exception as filter_error:

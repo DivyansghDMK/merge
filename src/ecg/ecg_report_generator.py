@@ -1,13 +1,13 @@
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, Image, PageBreak
 )
 import os
 import sys
 import json
-from datetime import datetime
 import matplotlib.pyplot as plt  
 import matplotlib
 import numpy as np
@@ -219,10 +219,6 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
         if ecg_test_page.data and len(ecg_test_page.data) > 0:
             print(f"   data[0] length: {len(ecg_test_page.data[0]) if isinstance(ecg_test_page.data[0], (list, np.ndarray)) else 'N/A'}")
     
-    # Calculate samples needed for exactly 10 seconds
-    sampling_rate = saved_data.get("sampling_rate", 80.0)
-    samples_for_10_sec = int(sampling_rate * 10)
-    
     for i, lead_name in enumerate(lead_names):
         data_to_save = []
         
@@ -235,45 +231,28 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
                     ptr = ecg_test_page.ptrs[i]
                     window_size = getattr(ecg_test_page, 'window_size', 1000)
                     
+                    # For report generation: use FULL buffer (5000 samples), not just window_size (1000)
                     # Get all available data from buffer, starting from ptr
                     if ptr + len(buffer) <= len(buffer):
                         # No wrap needed: get from ptr to end, then from start to ptr
                         part1 = buffer[ptr:].tolist()
                         part2 = buffer[:ptr].tolist()
-                        full_buffer = part1 + part2  # Full circular buffer
+                        data_to_save = part1 + part2  # Full circular buffer
                     else:
                         # Simple case: use all buffer data
-                        full_buffer = buffer.tolist()
-                    
-                    # Extract exactly 10 seconds (most recent samples)
-                    if len(full_buffer) >= samples_for_10_sec:
-                        data_to_save = full_buffer[-samples_for_10_sec:]
-                    else:
-                        data_to_save = full_buffer  # Use all available if less than 10 seconds
+                        data_to_save = buffer.tolist()
                 else:
                     # No ptrs: use ALL available data (full buffer)
-                    full_buffer = buffer.tolist()
-                    # Extract exactly 10 seconds (most recent samples)
-                    if len(full_buffer) >= samples_for_10_sec:
-                        data_to_save = full_buffer[-samples_for_10_sec:]
-                    else:
-                        data_to_save = full_buffer  # Use all available if less than 10 seconds
+                    data_to_save = buffer.tolist()
         
         # Priority 2: Fallback to ecg_test_page.data (smaller buffer, 1000 samples)
         if not data_to_save and i < len(ecg_test_page.data):
             lead_data = ecg_test_page.data[i]
             if isinstance(lead_data, np.ndarray):
-                full_data = lead_data.tolist()
+                # Use ALL available data (not just window_size)
+                data_to_save = lead_data.tolist()
             elif isinstance(lead_data, (list, tuple)):
-                full_data = list(lead_data)
-            else:
-                full_data = []
-            
-            # Extract exactly 10 seconds (most recent samples)
-            if len(full_data) >= samples_for_10_sec:
-                data_to_save = full_data[-samples_for_10_sec:]
-            else:
-                data_to_save = full_data  # Use all available if less than 10 seconds
+                data_to_save = list(lead_data)
         
         saved_data["leads"][lead_name] = data_to_save if data_to_save else []
     
@@ -294,26 +273,14 @@ def save_ecg_data_to_file(ecg_test_page, output_file=None):
             print(f"   Expected time window: 13.2s")
             print(f"    TIP: Run ECG for at least 15-20 seconds to accumulate sufficient data")
     
-    # Verify we have 10 seconds of data for each lead
-    sampling_rate = saved_data.get("sampling_rate", 80.0)
-    samples_for_10_sec = int(sampling_rate * 10)
-    actual_durations = {}
-    for lead_name, lead_data in saved_data["leads"].items():
-        if lead_data:
-            actual_samples = len(lead_data)
-            actual_duration = actual_samples / sampling_rate
-            actual_durations[lead_name] = actual_duration
-    
     # Save to file
     try:
         with open(output_file, 'w') as f:
             json.dump(saved_data, f, indent=2)
-        print(f"✅ Saved 12-lead ECG data (10 seconds) to: {output_file}")
+        print(f"Saved ECG data to: {output_file}")
         print(f"   Leads saved: {list(saved_data['leads'].keys())}")
         print(f"   Sampling rate: {saved_data['sampling_rate']} Hz")
-        print(f"   Expected samples for 10s: {samples_for_10_sec}")
-        print(f"   Actual samples per lead: {[len(saved_data['leads'][lead]) for lead in saved_data['leads']]}")
-        print(f"   Actual duration per lead: {[f'{actual_durations.get(lead, 0):.2f}s' for lead in saved_data['leads']]}")
+        print(f"   Total data points per lead: {[len(saved_data['leads'][lead]) for lead in saved_data['leads']]}")
         return output_file
     except Exception as e:
         print(f" Error saving ECG data: {e}")
@@ -1014,7 +981,9 @@ def generate_ecg_report(
         # Data will be automatically saved before report generation
     """
    
-   
+    # Ensure mm is available in local scope
+    from reportlab.lib.units import mm
+    
     # Main function body starts here
     if data is None:
         # When no device connected or demo off - show ZERO values (not dummy values)
@@ -1295,294 +1264,25 @@ def generate_ecg_report(
     print(f" Lead order for REPORT: {lead_order}")
 
     doc = SimpleDocTemplate(filename, pagesize=A4,
-                            rightMargin=30, leftMargin=30,
-                            topMargin=30, bottomMargin=30)
+                            rightMargin=5 * mm, leftMargin=5 * mm,  # 5mm margins for 40 boxes
+                            topMargin=6 * mm, bottomMargin=6 * mm)  # 6mm margins for 57 boxes
 
     story = []
     styles = getSampleStyleSheet()
     
-    # HEADING STYLE FOR TITLE
-    heading = ParagraphStyle(
-        'Heading',
-        fontSize=16,
-        textColor=colors.HexColor("#000000"),
-        spaceAfter=12,
-        leading=20,
-        alignment=1,  
-        bold=True
-    )
-
-    # Title (switch based on demo mode)
-    is_demo = False
-    try:
-        if ecg_test_page and hasattr(ecg_test_page, 'demo_toggle'):
-            is_demo = bool(ecg_test_page.demo_toggle.isChecked())
-    except Exception:
-        pass
-
-    title_text = "Demo ECG Report" if is_demo else "ECG Report"
-    story.append(Paragraph(f"<b>{title_text}</b>", heading))
-    story.append(Spacer(1, 12))
-
-
-    # Patient Details
+    # Skip all Page 1 content - go directly to Page 2 content
+    # Page 2 will now become Page 1 (portrait)
+    
+    # Patient details for what was Page 2 (now Page 1)
     if patient is None:
         patient = {}
     
-    first_name = patient.get("first_name", "")
-    last_name = patient.get("last_name", "")
-    age = patient.get("age", "")
-    gender = patient.get("gender", "")
-   
-    date_time = patient.get("date_time", "")
-    
-    story.append(Paragraph("<b>Patient Details</b>", styles['Heading3']))
-    patient_table = Table([
-        ["Name:", f"{first_name} {last_name}".strip(), "Age:", f"{age}", "Gender:", f"{gender}"],
-        ["Date:", f"{date_time.split()[0] if date_time else ''}", "Time:", f"{date_time.split()[1] if len(date_time.split()) > 1 else ''}", "", ""],
-        # ], colWidths=[80, 150, 50, 80, 60, 150])  # Increased all column widths
-            ], colWidths=[70, 130, 40, 70, 50, 140])  # Total width = 500
-    patient_table.setStyle(TableStyle([
-        ("BOX", (0,0), (-1,-1), 1, colors.black),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-        ("ALIGN", (0,0), (-1,-1), "LEFT"),
-    ]))
-    story.append(patient_table)
-    story.append(Spacer(1, 12)) 
-
-    # Report Overview
-    story.append(Paragraph("<b>Report Overview</b>", styles['Heading3']))
-    # Build heart rate statistics over rolling ≥10s RR/HR arrays; fall back to "--"
-    hr_values = []
-    rr_values = []
-    for key in ["hr_values", "hr_list", "hr_buffer", "hr_history", "hr_series", "hr_per_minute_for_report"]:
-        vals = data.get(key)
-        if isinstance(vals, (list, tuple, np.ndarray)):
-            for v in vals:
-                vf = _safe_float(v)
-                if vf and vf > 0:
-                    hr_values.append(vf)
-    for key in ["RR_ms_series", "RR_ms_window"]:
-        vals = data.get(key)
-        if isinstance(vals, (list, tuple, np.ndarray)):
-            for v in vals:
-                vf = _safe_float(v)
-                if vf and vf > 0:
-                    rr_values.append(vf)
-    # Include single RR_ms if present
-    rr_single = _safe_float(data.get("RR_ms"))
-    if rr_single and rr_single > 0:
-        rr_values.append(rr_single)
-    # If only RR available, convert to HR
-    if rr_values and not hr_values:
-        hr_values = [60000.0 / v for v in rr_values if v > 0]
-    # Ensure window length roughly ≥10s (500 Hz → 5000 samples, but use count proxy)
-    if len(hr_values) < 2 and hr_bpm_value and hr_bpm_value > 0:
-        hr_values.append(hr_bpm_value)
-    max_hr = max(hr_values) if hr_values else None
-    min_hr = min(hr_values) if hr_values else None
-    avg_hr = float(np.mean(hr_values)) if hr_values else None
-
-    def _fmt_bpm(value):
-        return f"{value:.0f} bpm" if value and value > 0 else "--"
-
-    overview_data = [
-        ["Maximum Heart Rate:", _fmt_bpm(max_hr)],
-        ["Minimum Heart Rate:", _fmt_bpm(min_hr)],
-        ["Average Heart Rate:", _fmt_bpm(avg_hr)],
-    ]
-    table = Table(overview_data, colWidths=[300, 200])
-    table.setStyle(TableStyle([
-        ("BOX", (0,0), (-1,-1), 1, colors.black),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-        ("ALIGN", (0,0), (-1,-1), "LEFT"),
-    ]))
-    story.append(table)
-    story.append(Spacer(1, 15))  # Reduced from 35
-
-    # Observation with 3 parts in ONE table (like in the image) - MADE SMALLER
-    story.append(Paragraph("<b>OBSERVATION</b>", styles['Heading3']))
-    story.append(Spacer(1, 6))  
-    
-    # Create table with 3 columns: Interval Names, Observed Values, Standard Range
-    obs_headers = ["Interval Names", "Observed Values", "Standard Range"]
-    def _fmt_ms(value):
-        return f"{value:.0f} ms" if value and _safe_float(value) and _safe_float(value) > 0 else "--"
-
-    def _fmt_mv(value):
-        try:
-            vf = _safe_float(value)
-            if vf is not None:
-                return f"{int(round(vf))}"
-        except Exception:
-            pass
-        return "--"
-
-    def _fmt_deg(value):
-        try:
-            vf = _safe_float(value)
-            if vf and vf != 0:
-                return f"{vf:.0f}°"
-        except Exception:
-            pass
-        if value and str(value).strip() not in ["", "0", "0.0"]:
-            return f"{value}°" if not str(value).endswith("°") else str(value)
-        return "--"
-
-    def _fmt_qtcf(value):
-        try:
-            vf = _safe_float(value)
-            if vf and vf > 0:
-                sec = vf / 1000.0
-                return f"{sec:.3f} s"
-        except Exception:
-            pass
-        return "--"
-
-    obs_data = [
-        ["Heart Rate", _fmt_bpm(data.get('beat')), "60-100"],                    
-        ["PR Interval", _fmt_ms(data.get('PR')), "120 ms - 200 ms"],            
-        ["QRS Complex", _fmt_ms(data.get('QRS')), "70 ms - 120 ms"],         
-        ["QT Interval", _fmt_ms(data.get('QT')), "300 ms - 450 ms"],            
-        ["QTCB (Bazett)", _fmt_ms(data.get('QTc')), "300 ms - 450 ms"],          
-        ["QTCF (Fridericia)", _fmt_qtcf(data.get('QTc_Fridericia')), "300 ms - 450 ms"],          
-        ["ST Deviation (J+60 ms)", _fmt_mv(data.get('ST')), "Normal"],            
-    ]
-    
-    # Add headers to data
-    obs_table_data = [obs_headers] + obs_data
-    
-    # Table dimensions - match total width (500) like other sections
-    COLUMN_WIDTH_1 = 165  
-    COLUMN_WIDTH_2 = 170 
-    COLUMN_WIDTH_3 = 165
-    ROW_HEIGHT = 12       
-    HEADER_HEIGHT = 22    
-    
-    # Create table with 3 columns and custom dimensions
-    obs_table = Table(obs_table_data, colWidths=[COLUMN_WIDTH_1, COLUMN_WIDTH_2, COLUMN_WIDTH_3])
-    
-    # Style the table with custom dimensions - SMALLER
-    obs_table.setStyle(TableStyle([
-        # Header row styling - REDUCED
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e6f2")),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),  # Reduced from 11 to 9
-        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), HEADER_HEIGHT//2),
-        ("TOPPADDING", (0, 0), (-1, 0), HEADER_HEIGHT//2),
-        
-        # Data rows styling - REDUCED
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 1), (-1, -1), 8),  # Reduced from 10 to 8
-        ("ALIGN", (0, 1), (-1, -1), "CENTER"),
-        ("BOTTOMPADDING", (0, 1), (-1, -1), 3),  # Reduced from 5 to 3
-        ("TOPPADDING", (0, 1), (-1, -1), 3),     # Reduced from 5 to 3
-        
-        # Grid and borders
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("BOX", (0, 0), (-1, -1), 1, colors.black),
-    ]))
-    
-    story.append(obs_table)
-    story.append(Spacer(1, 8))  # Reduced spacing
-
-   
-
-    # Conclusion in table format - NOW DYNAMIC FROM DASHBOARD - ONLY REAL CONCLUSIONS - MADE SMALLER
-    story.append(Paragraph("<b>ECG Report Conclusion</b>", styles['Heading3']))
-    story.append(Spacer(1, 6))   # Reduced spacing
-    
-    # Create dynamic conclusion table using ONLY filtered conclusions (no empty/---)
-    conclusion_headers = ["S.No.", "Conclusion"]
-    conclusion_data = []
-    
-    # ONLY show real conclusions with proper numbering (1, 2, 3...)
-    for i, conclusion in enumerate(filtered_conclusions, 1):
-        conclusion_data.append([str(i), conclusion])
-    
-    print(f" Creating conclusion table with {len(conclusion_data)} rows (only real conclusions):")
-    for row in conclusion_data:
-        print(f"   {row}")
-    
-    # Add headers to conclusion data
-    conclusion_table_data = [conclusion_headers] + conclusion_data
-    
-    # Create conclusion table - match total width (500) like other sections
-    conclusion_table = Table(conclusion_table_data, colWidths=[80, 420])
-    
-    # Style the conclusion table - SMALLER
-    conclusion_table.setStyle(TableStyle([
-        # Header row styling - REDUCED
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e6f2")),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),  
-        ("ALIGN", (0, 0), (-1, 0), "CENTER"), 
-        ("TOPPADDING", (0, 0), (-1, 0), 6),  
-        
-        # Data rows styling - REDUCED
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 1), (-1, -1), 8),  
-        ("ALIGN", (0, 1), (0, -1), "CENTER"),  
-        ("ALIGN", (1, 1), (1, -1), "LEFT"),     
-        ("BOTTOMPADDING", (0, 1), (-1, -1), 4),  
-        ("TOPPADDING", (0, 1), (-1, -1), 4),    
-        
-        # Grid and borders
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("BOX", (0, 0), (-1, -1), 1, colors.black),
-    ]))
-    
-    story.append(conclusion_table)
-    story.append(Spacer(1, 8))  # Reduced spacing
-
-    # REMOVE PageBreak HERE to send patient details to Page 2
-    # story.append(PageBreak())
-
-    # Now these patient details will be on Page 2 top
-    # Patient header on Page 2 (Name, Age, Gender, Date/Time)
-    if patient is None:
-        patient = {}
     first_name = patient.get("first_name", "")
     last_name = patient.get("last_name", "")
     full_name = f"{first_name} {last_name}".strip()
     age = patient.get("age", "")
     gender = patient.get("gender", "")
     date_time_str = patient.get("date_time", "")
-
-    # REMOVED: Date/Time table from story - will be added in master drawing instead
-    # Patient info and vital parameters are now in master drawing above ECG graph
-    # No extra spacing needed as they're positioned in drawing coordinates
-
-    
-    # Vital Parameters Header (completely transparent)
-    vital_style = ParagraphStyle(
-        'VitalStyle',
-        fontSize=12,  # Increased from 11
-        fontName='Helvetica-Bold',
-        textColor=colors.black,
-        spaceAfter=15,
-        alignment=1,  # center
-        # Add white background 
-        # for better visibility on pink grid
-        backColor=colors.white,
-    )
-
-    # Vital Parameters Header (on top of background)
-    vital_style = ParagraphStyle(
-
-
-            
-        'VitalStyle',
-        fontSize=11,
-        fontName='Helvetica-Bold',
-        textColor=colors.black,
-        spaceAfter=15,
-        alignment=1,  # center
-        
-    )
 
     # Get real ECG data from dashboard
     HR = data.get('HR_avg', 70)
@@ -1594,6 +1294,22 @@ def generate_ecg_report(
     ST = data.get('ST', 114)
     # DYNAMIC RR interval calculation from heart rate (instead of hard-coded 857)
     RR = int(60000 / HR) if HR and HR > 0 else 0  # RR interval in ms from heart rate
+
+    # Formatting functions
+    def _fmt_bpm(value):
+        return f"{value:.0f} bpm" if value and value > 0 else "--"
+
+    def _fmt_ms(value):
+        return f"{value:.0f} ms" if value and _safe_float(value) and _safe_float(value) > 0 else "--"
+
+    def _fmt_mv(value):
+        try:
+            vf = _safe_float(value)
+            if vf is not None:
+                return f"{int(round(vf))}"
+        except Exception:
+            pass
+        return "--"
 
     # Create table data: 4 rows × 2 columns
     vital_table_data = [
@@ -1628,8 +1344,10 @@ def generate_ecg_report(
     print("Creating SINGLE drawing with all ECG content...")
     
     # Single drawing dimensions - ADJUSTED HEIGHT to fit within page frame (max ~770)
-    total_width = 520   # Full page width
-    total_height = 720  # Reduced to 720 to fit within page frame (max ~770) with margin
+    total_width = 195 * mm  # 39 boxes × 5mm = 195mm
+    total_height = 280 * mm  # 56 boxes × 5mm = 280mm
+    # DEBUG: Print actual dimensions being used
+    print(f" DEBUG: Drawing dimensions - Width: {total_width/mm:.1f}mm ({total_width/mm/5:.1f} boxes), Height: {total_height/mm:.1f}mm ({total_height/mm/5:.1f} boxes)")
     
     # Create ONE master drawing
     master_drawing = Drawing(total_width, total_height)
@@ -1637,7 +1355,7 @@ def generate_ecg_report(
     # STEP 1: NO background rectangle - let page pink grid show through
     
     # STEP 2: Define positions for all 12 leads based on selected sequence (SHIFTED UP by 80 points total: 40+25+15)
-    y_positions = [580, 530, 480, 430, 380, 330, 280, 230, 180, 130, 80, 30]  
+    y_positions = [229.6 * mm, 212.0 * mm, 194.3 * mm, 176.7 * mm, 159.1 * mm, 141.4 * mm, 123.8 * mm, 106.1 * mm, 88.5 * mm, 70.9 * mm, 53.2 * mm, 35.6 * mm]  
     lead_positions = []
     
     for i, lead in enumerate(lead_order):
@@ -1717,7 +1435,7 @@ def generate_ecg_report(
         y_pos = pos_info['y']
         try:
             from reportlab.graphics.shapes import String, Group
-            lead_label = String(10, y_pos + 20, f"{lead}", fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+            lead_label = String(3.5 * mm, y_pos + 7.1 * mm, f"{lead}", fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
             master_drawing.add(lead_label)
             if lead in lead_drawings:
                 sub = lead_drawings[lead]
@@ -1737,15 +1455,15 @@ def generate_ecg_report(
     from reportlab.graphics.shapes import String
 
     # LEFT SIDE: Patient Info (ABOVE ECG GRAPH - shifted further up)
-    patient_name_label = String(-30, 740, f"Name: {full_name}",  # Moved up from 700 to 710
+    patient_name_label = String(-5.6 * mm, 284.1 * mm, f"Name: {full_name}",  # Moved up from 700 to 710
                            fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_name_label)
 
-    patient_age_label = String(-30, 720, f"Age: {age}",  # Moved up from 680 to 690
+    patient_age_label = String(-5.6 * mm, 277.0 * mm, f"Age: {age}",  # Moved up from 680 to 690
                           fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_age_label)
 
-    patient_gender_label = String(-30, 700, f"Gender: {gender}",  # Moved up from 660 to 670
+    patient_gender_label = String(-5.6 * mm, 269.9 * mm, f"Gender: {gender}",  # Moved up from 660 to 670
                              fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_gender_label)
     
@@ -1755,15 +1473,30 @@ def generate_ecg_report(
         date_part = parts[0] if parts else ""
         time_part = parts[1] if len(parts) > 1 else ""
     else:
-        date_part, time_part = "____", "____"
+        # Use current date and time if not provided
+        from datetime import datetime
+        now = datetime.now()
+        date_part = now.strftime("%d/%m/%Y")
+        time_part = now.strftime("%H:%M:%S")
     
-    date_label = String(400, 710, f"Date: {date_part}",  # Moved up from 700 to 710
+    date_label = String(161.7 * mm, 269.5 * mm, f"Date: {date_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(date_label)
     
-    time_label = String(400, 695, f"Time: {time_part}",  # Moved up from 680 to 690
+    time_label = String(161.7 * mm, 264.2 * mm, f"Time: {time_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(time_label)
+    
+    # Org and Phone No. labels below date/time
+    # Org label (15 points below time)
+    org_label = String(161.7 * mm, 258.9 * mm, f"Org: {patient.get('Org.', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                     fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(org_label)
+    
+    # Phone No. label (15 points below org)
+    phone_label = String(161.7 * mm, 253.6 * mm, f"Phone No: {patient.get('doctor_mobile', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                        fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(phone_label)
 
     # RIGHT SIDE: Vital Parameters at SAME LEVEL as patient info (ABOVE ECG GRAPH)
     # Get real ECG data from dashboard
@@ -1810,8 +1543,8 @@ def generate_ecg_report(
     print("Creating SINGLE drawing with all ECG content...")
     
     # Single drawing dimensions - ADJUSTED HEIGHT to fit within page frame (max ~770)
-    total_width = 520   # Full page width
-    total_height = 720  
+    total_width = 195 * mm  # 39 boxes × 5mm = 195mm
+    total_height = 280 * mm  # 56 boxes × 5mm = 280mm  
     
     # Create ONE master drawing
     master_drawing = Drawing(total_width, total_height)
@@ -1819,7 +1552,7 @@ def generate_ecg_report(
     # STEP 1: NO background rectangle - let page pink grid show through
     
     # STEP 2: Define positions for all 12 leads based on selected sequence (SHIFTED UP by 80 points total: 40+25+15)
-    y_positions = [580, 530, 480, 430, 380, 330, 280, 230, 180, 130, 80, 30]  
+    y_positions = [229.6 * mm, 212.0 * mm, 194.3 * mm, 176.7 * mm, 159.1 * mm, 141.4 * mm, 123.8 * mm, 106.1 * mm, 88.5 * mm, 70.9 * mm, 53.2 * mm, 35.6 * mm]  
     6
     lead_positions = []
     
@@ -1902,7 +1635,7 @@ def generate_ecg_report(
         try:
             # STEP 3A: Add lead label directly
             from reportlab.graphics.shapes import String
-            lead_label = String(10, y_pos + 20, f"{lead}", 
+            lead_label = String(3.5 * mm, y_pos + 7.1 * mm, f"{lead}", 
                               fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
             master_drawing.add(lead_label)
             
@@ -2213,9 +1946,84 @@ def generate_ecg_report(
                 # Add path to master drawing
                 master_drawing.add(ecg_path)
                 
+                # Add calibration notch 15 points after ECG strip starts for all 12 leads
+                print(f" DEBUG: Adding calibration notch for Lead {lead}")
+                from reportlab.graphics.shapes import Path
+                
+                # Calibration notch dimensions
+                notch_width_mm = 5.0   # width 5mm
+                notch_height_mm = 10.0 # height 10mm
+                notch_width = notch_width_mm * mm
+                notch_height = notch_height_mm * mm
+                
+                # Position notch 15 points after where ECG strip starts, then shift 40 points left
+                notch_x = x_pos + 15.0 - 40.0
+                notch_y_base = center_y  # Use same center_y as ECG data
+                
+                print(f" DEBUG: Notch position for Lead {lead} - X: {notch_x}, Y: {notch_y_base}, Width: {notch_width}, Height: {notch_height}")
+                
+                # Create calibration notch path
+                notch_path = Path(
+                    fillColor=None,
+                    strokeColor=colors.HexColor("#000000"),
+                    strokeWidth=0.8,
+                    strokeLineCap=1,
+                    strokeLineJoin=0
+                )
+                notch_path.moveTo(notch_x, notch_y_base)
+                notch_path.lineTo(notch_x, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base)
+                # Small forward tick to the right (extra 2mm) for clearer notch end
+                notch_path.lineTo(notch_x + notch_width + (2.0 * mm), notch_y_base)
+                
+                # Add notch to master drawing
+                master_drawing.add(notch_path)
+                print(f" DEBUG: Calibration notch added for Lead {lead}")
+                
                 print(f" Drew {len(real_ecg_data)} ECG data points for Lead {lead}")
             else:
                 print(f" No real data for Lead {lead} - showing grid only")
+                
+                # Add calibration notch 15 points after ECG strip starts even when no data is available
+                print(f" DEBUG: Adding calibration notch for Lead {lead} (no data case)")
+                from reportlab.lib.units import mm
+                from reportlab.graphics.shapes import Path
+                
+                # Calculate center_y same as real data section
+                ecg_height = 45  # Same as real data section
+                center_y = y_pos + (ecg_height / 2.0)  # Center of the graph in points
+                
+                # Calibration notch dimensions
+                notch_width_mm = 5.0   # width 5mm
+                notch_height_mm = 10.0 # height 10mm
+                notch_width = notch_width_mm * mm
+                notch_height = notch_height_mm * mm
+                
+                # Position notch 15 points after where ECG strip starts, then shift 40 points left
+                notch_x = x_pos + 15.0 - 40.0
+                notch_y_base = center_y  # Use same center_y calculation as real data section
+                
+                print(f" DEBUG: Notch position for Lead {lead} (no data) - X: {notch_x}, Y: {notch_y_base}, Width: {notch_width}, Height: {notch_height}")
+                
+                # Create calibration notch path
+                notch_path = Path(
+                    fillColor=None,
+                    strokeColor=colors.HexColor("#000000"),
+                    strokeWidth=0.8,
+                    strokeLineCap=1,
+                    strokeLineJoin=0
+                )
+                notch_path.moveTo(notch_x, notch_y_base)
+                notch_path.lineTo(notch_x, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base)
+                # Small forward tick to the right (extra 2mm) for clearer notch end
+                notch_path.lineTo(notch_x + notch_width + (2.0 * mm), notch_y_base)
+                
+                # Add notch to master drawing
+                master_drawing.add(notch_path)
+                print(f" DEBUG: Calibration notch added for Lead {lead} (no data case)")
             
             successful_graphs += 1
             
@@ -2229,15 +2037,15 @@ def generate_ecg_report(
     from reportlab.graphics.shapes import String
 
     # LEFT SIDE: Patient Info (ABOVE ECG GRAPH - shifted further up)
-    patient_name_label = String(-30, 740, f"Name: {full_name}",  # Moved up from 700 to 710
+    patient_name_label = String(-5.6 * mm, 284.1 * mm, f"Name: {full_name}",  # Moved up from 700 to 710
                            fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_name_label)
 
-    patient_age_label = String(-30, 720, f"Age: {age}",  # Moved up from 680 to 690
+    patient_age_label = String(-5.6 * mm, 277.0 * mm, f"Age: {age}",  # Moved up from 680 to 690
                           fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_age_label)
 
-    patient_gender_label = String(-30, 700, f"Gender: {gender}",  # Moved up from 660 to 670
+    patient_gender_label = String(-5.6 * mm, 269.9 * mm, f"Gender: {gender}",  # Moved up from 660 to 670
                              fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_gender_label)
     
@@ -2247,15 +2055,30 @@ def generate_ecg_report(
         date_part = parts[0] if parts else ""
         time_part = parts[1] if len(parts) > 1 else ""
     else:
-        date_part, time_part = "____", "____"
+        # Use current date and time if not provided
+        from datetime import datetime
+        now = datetime.now()
+        date_part = now.strftime("%d/%m/%Y")
+        time_part = now.strftime("%H:%M:%S")
     
-    date_label = String(400, 710, f"Date: {date_part}",  # Moved up from 700 to 710
+    date_label = String(161.7 * mm, 269.5 * mm, f"Date: {date_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(date_label)
     
-    time_label = String(400, 695, f"Time: {time_part}",  # Moved up from 680 to 690
+    time_label = String(161.7 * mm, 264.2 * mm, f"Time: {time_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(time_label)
+    
+    # Org and Phone No. labels below date/time
+    # Org label (15 points below time)
+    org_label = String(161.7 * mm, 258.9 * mm, f"Org: {patient.get('Org.', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                     fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(org_label)
+    
+    # Phone No. label (15 points below org)
+    phone_label = String(161.7 * mm, 253.6 * mm, f"Phone No: {patient.get('doctor_mobile', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                        fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(phone_label)
 
     # RIGHT SIDE: Vital Parameters at SAME LEVEL as patient info (ABOVE ECG GRAPH)
     # Get real ECG data from dashboard
@@ -2302,8 +2125,8 @@ def generate_ecg_report(
     print("Creating SINGLE drawing with all ECG content...")
     
     # Single drawing dimensions - ADJUSTED HEIGHT to fit within page frame (max ~770)
-    total_width = 520   # Full page width
-    total_height = 720  # Reduced to 720 to fit within page frame (max ~770) with margin
+    total_width = 195 * mm  # 39 boxes × 5mm = 195mm
+    total_height = 280 * mm  # 56 boxes × 5mm = 280mm
     
     # Create ONE master drawing
     master_drawing = Drawing(total_width, total_height)
@@ -2311,7 +2134,7 @@ def generate_ecg_report(
     # STEP 1: NO background rectangle - let page pink grid show through
     
     # STEP 2: Define positions for all 12 leads based on selected sequence (SHIFTED UP by 80 points total: 40+25+15)
-    y_positions = [580, 530, 480, 430, 380, 330, 280, 230, 180, 130, 80, 30]  
+    y_positions = [229.6 * mm, 212.0 * mm, 194.3 * mm, 176.7 * mm, 159.1 * mm, 141.4 * mm, 123.8 * mm, 106.1 * mm, 88.5 * mm, 70.9 * mm, 53.2 * mm, 35.6 * mm]  
     6
     lead_positions = []
     
@@ -2394,7 +2217,7 @@ def generate_ecg_report(
         try:
             # STEP 3A: Add lead label directly
             from reportlab.graphics.shapes import String
-            lead_label = String(10, y_pos + 20, f"{lead}", 
+            lead_label = String(3.5 * mm, y_pos + 7.1 * mm, f"{lead}", 
                               fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
             master_drawing.add(lead_label)
             
@@ -2698,9 +2521,85 @@ def generate_ecg_report(
                 # Add path to master drawing
                 master_drawing.add(ecg_path)
                 
+                # Add calibration notch 15 points after ECG strip starts for all 12 leads
+                print(f" DEBUG: Adding calibration notch for Lead {lead}")
+                from reportlab.lib.units import mm
+                from reportlab.graphics.shapes import Path
+                
+                # Calibration notch dimensions
+                notch_width_mm = 5.0   # width 5mm
+                notch_height_mm = 10.0 # height 10mm
+                notch_width = notch_width_mm * mm
+                notch_height = notch_height_mm * mm
+                
+                # Position notch 15 points after where ECG strip starts, then shift 40 points left
+                notch_x = x_pos + 15.0 - 40.0
+                notch_y_base = center_y  # Use same center_y as ECG data
+                
+                print(f" DEBUG: Notch position for Lead {lead} - X: {notch_x}, Y: {notch_y_base}, Width: {notch_width}, Height: {notch_height}")
+                
+                # Create calibration notch path
+                notch_path = Path(
+                    fillColor=None,
+                    strokeColor=colors.HexColor("#000000"),
+                    strokeWidth=0.8,
+                    strokeLineCap=1,
+                    strokeLineJoin=0
+                )
+                notch_path.moveTo(notch_x, notch_y_base)
+                notch_path.lineTo(notch_x, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base)
+                # Small forward tick to the right (extra 2mm) for clearer notch end
+                notch_path.lineTo(notch_x + notch_width + (2.0 * mm), notch_y_base)
+                
+                # Add notch to master drawing
+                master_drawing.add(notch_path)
+                print(f" DEBUG: Calibration notch added for Lead {lead}")
+                
                 print(f" Drew {len(real_ecg_data)} ECG data points for Lead {lead}")
             else:
                 print(f" No real data for Lead {lead} - showing grid only")
+                
+                # Add calibration notch 15 points after ECG strip starts even when no data is available
+                print(f" DEBUG: Adding calibration notch for Lead {lead} (no data case)")
+                from reportlab.lib.units import mm
+                from reportlab.graphics.shapes import Path
+                
+                # Calculate center_y same as real data section
+                ecg_height = 45  # Same as real data section
+                center_y = y_pos + (ecg_height / 2.0)  # Center of the graph in points
+                
+                # Calibration notch dimensions
+                notch_width_mm = 5.0   # width 5mm
+                notch_height_mm = 10.0 # height 10mm
+                notch_width = notch_width_mm * mm
+                notch_height = notch_height_mm * mm
+                
+                # Position notch 15 points after where ECG strip starts, then shift 40 points left
+                notch_x = x_pos + 15.0 - 40.0
+                notch_y_base = center_y  # Use same center_y calculation as real data section
+                
+                print(f" DEBUG: Notch position for Lead {lead} (no data) - X: {notch_x}, Y: {notch_y_base}, Width: {notch_width}, Height: {notch_height}")
+                
+                # Create calibration notch path
+                notch_path = Path(
+                    fillColor=None,
+                    strokeColor=colors.HexColor("#000000"),
+                    strokeWidth=0.8,
+                    strokeLineCap=1,
+                    strokeLineJoin=0
+                )
+                notch_path.moveTo(notch_x, notch_y_base)
+                notch_path.lineTo(notch_x, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base + notch_height)
+                notch_path.lineTo(notch_x + notch_width, notch_y_base)
+                # Small forward tick to the right (extra 2mm) for clearer notch end
+                notch_path.lineTo(notch_x + notch_width + (2.0 * mm), notch_y_base)
+                
+                # Add notch to master drawing
+                master_drawing.add(notch_path)
+                print(f" DEBUG: Calibration notch added for Lead {lead} (no data case)")
             
             successful_graphs += 1
             
@@ -2714,15 +2613,15 @@ def generate_ecg_report(
     from reportlab.graphics.shapes import String
 
     # LEFT SIDE: Patient Info (ABOVE ECG GRAPH - shifted further up)
-    patient_name_label = String(-30, 740, f"Name: {full_name}",  # Moved up from 700 to 710
+    patient_name_label = String(-5.6 * mm, 284.1 * mm, f"Name: {full_name}",  # Moved up from 700 to 710
                            fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_name_label)
 
-    patient_age_label = String(-30, 720, f"Age: {age}",  # Moved up from 680 to 690
+    patient_age_label = String(-5.6 * mm, 277.0 * mm, f"Age: {age}",  # Moved up from 680 to 690
                           fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_age_label)
 
-    patient_gender_label = String(-30, 700, f"Gender: {gender}",  # Moved up from 660 to 670
+    patient_gender_label = String(-5.6 * mm, 269.9 * mm, f"Gender: {gender}",  # Moved up from 660 to 670
                              fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(patient_gender_label)
     
@@ -2732,15 +2631,30 @@ def generate_ecg_report(
         date_part = parts[0] if parts else ""
         time_part = parts[1] if len(parts) > 1 else ""
     else:
-        date_part, time_part = "____", "____"
+        # Use current date and time if not provided
+        from datetime import datetime
+        now = datetime.now()
+        date_part = now.strftime("%d/%m/%Y")
+        time_part = now.strftime("%H:%M:%S")
     
-    date_label = String(400, 710, f"Date: {date_part}",  # Moved up from 700 to 710
+    date_label = String(161.7 * mm, 269.5 * mm, f"Date: {date_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(date_label)
     
-    time_label = String(400, 695, f"Time: {time_part}",  # Moved up from 680 to 690
+    time_label = String(161.7 * mm, 264.2 * mm, f"Time: {time_part}",  # Shifted 30 points right from 400 to 430
                        fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(time_label)
+    
+    # Org and Phone No. labels below date/time
+    # Org label (15 points below time)
+    org_label = String(161.7 * mm, 258.9 * mm, f"Org: {patient.get('Org.', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                     fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(org_label)
+    
+    # Phone No. label (15 points below org)
+    phone_label = String(161.7 * mm, 253.6 * mm, f"Phone No: {patient.get('doctor_mobile', '') if patient else ''}",  # Shifted 30 points right from 400 to 430
+                        fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
+    master_drawing.add(phone_label)
 
     # RIGHT SIDE: Vital Parameters at SAME LEVEL as patient info (ABOVE ECG GRAPH)
     # Get real ECG data from dashboard
@@ -2755,31 +2669,31 @@ def generate_ecg_report(
    
     # Add vital parameters in TWO COLUMNS (ABOVE ECG GRAPH - shifted further up)
     # FIRST COLUMN (Left side - x=130)
-    hr_label = String(130, 740, f"HR    : {HR} bpm",  
+    hr_label = String(45.9 * mm, 284.1 * mm, f"HR    : {HR} bpm",  
                      fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(hr_label)
 
-    pr_label = String(130, 720, f"PR    : {PR} ms",  
+    pr_label = String(45.9 * mm, 279.0 * mm, f"PR    : {PR} ms",  
                      fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(pr_label)
 
-    qrs_label = String(130, 700, f"QRS : {QRS} ms", 
+    qrs_label = String(45.9 * mm, 273.9 * mm, f"QRS : {QRS} ms", 
                       fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(qrs_label)
     
-    rr_label = String(130, 682, f"RR    : {RR} ms", 
+    rr_label = String(45.9 * mm, 268.3 * mm, f"RR    : {RR} ms", 
                      fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(rr_label)
 
-    qt_label = String(130, 664, f"QT    : {int(round(QT))} ms",  
+    qt_label = String(45.9 * mm, 262.5 * mm, f"QT    : {int(round(QT))} ms",  
                      fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(qt_label)
 
-    qtc_label = String(130, 646, f"QTc  : {int(round(QTc))} ms",  
+    qtc_label = String(45.9 * mm, 257.4 * mm, f"QTc  : {int(round(QTc))} ms",  
                       fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(qtc_label)
     # SECOND COLUMN (Right side - x=240)
-    st_label = String(240, 664, f"ST            : {int(round(ST))} ms",  
+    st_label = String(84.7 * mm, 262.5 * mm, f"ST            : {int(round(ST))} ms",  
                      fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(st_label)
 
@@ -3230,7 +3144,7 @@ def generate_ecg_report(
     t_mm = extract_axis_value(t_axis_deg)
     
     # SECOND COLUMN - P/QRS/T Axis (ABOVE ECG GRAPH - same position)
-    p_qrs_label = String(240, 740, f"P/QRS/T  : {p_axis_display}/{qrs_axis_display}/{t_axis_display}°",  # Changed to axis values
+    p_qrs_label = String(84.7 * mm, 284.1 * mm, f"P/QRS/T  : {p_axis_display}/{qrs_axis_display}/{t_axis_display}°",  # Changed to axis values
                          fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(p_qrs_label)
 
@@ -3361,7 +3275,7 @@ def generate_ecg_report(
     # SECOND COLUMN - RV5/SV1 (ABOVE ECG GRAPH - shifted further up)
     # Display SV1 as negative mV (GE/Hospital standard)
     # Use 3 decimal places for precision (not rounded to integers)
-    rv5_sv_label = String(240, 720, f"RV5/SV1  : {rv5_mv:.3f} mV/{sv1_mv:.3f} mV",  # SV1 will show as negative
+    rv5_sv_label = String(84.7 * mm, 279.0 * mm, f"RV5/SV1  : {rv5_mv:.3f} mV/{sv1_mv:.3f} mV",  # SV1 will show as negative
                          fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(rv5_sv_label)
 
@@ -3372,7 +3286,7 @@ def generate_ecg_report(
     
     # SECOND COLUMN - RV5+SV1 (ABOVE ECG GRAPH - shifted further up)
     # Use 3 decimal places for precision
-    rv5_sv1_sum_label = String(240, 700, f"RV5+SV1 : {rv5_sv1_sum:.3f} mV",  # Moved up from 660 to 670
+    rv5_sv1_sum_label = String(84.7 * mm, 273.9 * mm, f"RV5+SV1 : {rv5_sv1_sum:.3f} mV",  # Moved up from 660 to 670
                                fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(rv5_sv1_sum_label)
 
@@ -3382,7 +3296,7 @@ def generate_ecg_report(
         qtcf_text = f"QTCF       : {qtcf_val:.0f} ms"
     else:
         qtcf_text = "QTCF       : --"
-    qtcf_label = String(240, 682, qtcf_text,  # Moved up from 642 to 652
+    qtcf_label = String(84.7 * mm, 268.3 * mm, qtcf_text,  # Moved up from 642 to 652
                         fontSize=10, fontName="Helvetica", fillColor=colors.black)
     master_drawing.add(qtcf_label)
 
@@ -3390,8 +3304,7 @@ def generate_ecg_report(
     filter_band = settings_manager.get_setting("filter_band", "0.5~35Hz")
     ac_frequency = settings_manager.get_setting("ac_frequency", "50")
     master_drawing.add(String(
-        240,
-        646,  # Moved up from 606 to 616
+        84.7 * mm, 257.4 * mm,
         f"{wave_speed_mm_s} mm/s   {filter_band}   AC : {ac_frequency}Hz   {wave_gain_mm_mv} mm/mV",
         fontSize=10,
         fontName="Helvetica",
@@ -3414,36 +3327,36 @@ def generate_ecg_report(
         doctor = ""
   
     # Doctor Name (below V6 lead)
-    doctor_name_label = String(-30, -10, "Doctor Name: ", 
+    doctor_name_label = String(3.6 * mm, 19.0 * mm, "Doctor Name: ", 
                               fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
     master_drawing.add(doctor_name_label)
     
     if doctor:
-        value_x = -30 + stringWidth(label_text, "Helvetica-Bold", 10) + 6
-        doctor_name_value = String(value_x, -10, doctor,
+        value_x = 3.6 * mm + stringWidth("Doctor Name: ", "Helvetica-Bold", 10) + 5 * mm
+        doctor_name_value = String(value_x, 19.0 * mm, doctor,
                                 fontSize=10, fontName="Helvetica", fillColor=colors.black)
         master_drawing.add(doctor_name_value)
 
     # Doctor Signature (below Doctor Name)
-    doctor_sign_label = String(-30, -25, "Doctor Sign: ", 
+    doctor_sign_label = String(3.6 * mm, 13.7 * mm, "Doctor Sign: ", 
                               fontSize=10, fontName="Helvetica-Bold", fillColor=colors.black)
     master_drawing.add(doctor_sign_label)
 
     # Add RIGHT-SIDE Conclusion Box (moved to the right) - NOW DYNAMIC FROM DASHBOARD (12 conclusions max) - MADE SMALLER
     # SHIFTED DOWN further (additional 5 points)
-    conclusion_y_start = -9.  # Shifted down from 0 to -5 (5 more points down to shift container lower)
+    conclusion_y_start = 26.8 * mm  # Shifted up by 20mm  # Shifted down from 0 to -5 (5 more points down to shift container lower)
     
     # Create a rectangular box for conclusions (shifted right) - INCREASED HEIGHT (same position)
     # Height increased: bottom extended down (top position same). Length increased by 20 (x position fixed)
     from reportlab.graphics.shapes import Rect
-    conclusion_box = Rect(200, conclusion_y_start - 55, 355, 75,  # Width 325→345 (+20); height 65→75 (+10)
+    conclusion_box = Rect(70.6 * mm, conclusion_y_start - 26.5 * mm, 125.2 * mm, 26.5 * mm,  # Width 325→345 (+20); height 65→75 (+10)
                          fillColor=None, strokeColor=colors.black, strokeWidth=1.5)
     master_drawing.add(conclusion_box)
     
     # CENTERED and STYLISH "Conclusion" header - DYNAMIC - SMALLER (AT TOP OF CONTAINER - CLOSE TO TOP LINE)
     # Box center: 200 + (325/2) = 362.5, so text should be centered around 362.5
     # Box top is at conclusion_y_start - 55, so header should be very close to top line
-    conclusion_header = String(362.5, conclusion_y_start + 8, "✦ CONCLUSION ✦",  # Moved very close to top line: y=0→-53 (just below top edge at -55)
+    conclusion_header = String(127.9 * mm, conclusion_y_start - 3.0 * mm, "✦ CONCLUSION ✦",  # Moved very close to top line: y=0→-53 (just below top edge at -55)
                               fontSize=9, fontName="Helvetica-Bold",  # Reduced from 11 to 9
                               fillColor=colors.HexColor("#2c3e50"),
                               textAnchor="middle")  # This centers the text
@@ -3468,8 +3381,8 @@ def generate_ecg_report(
         print(f"   Row {idx+1}: {row}")
     
     # Draw conclusions row by row - ONLY REAL ONES with proper numbering
-    row_spacing = 8  # Vertical spacing between rows
-    start_y = conclusion_y_start - 10  # Starting Y position
+    row_spacing = 2.8 * mm  # Vertical spacing between rows
+    start_y = conclusion_y_start - 8.0 * mm  # Starting Y position
     
     conclusion_num = 1  # Start numbering from 1
     for row_idx, row_conclusions in enumerate(conclusion_rows):
@@ -3481,7 +3394,7 @@ def generate_ecg_report(
             conc_text = f"{conclusion_num}. {display_conclusion}"
             
             # Position horizontally across the box (2 conclusions per row)
-            x_pos = 210 + (col_idx * 160)  # 160 points spacing for 2 conclusions per row
+            x_pos = 74.1 * mm + (col_idx * 56.4 * mm)  # 160 points spacing for 2 conclusions per row
             
             conc = String(x_pos, row_y, conc_text, 
                          fontSize=9, fontName="Helvetica", fillColor=colors.black)
@@ -3493,7 +3406,6 @@ def generate_ecg_report(
     
     # STEP 5: Add SINGLE master drawing to story (NO containers)
     story.append(master_drawing)
-    story.append(Spacer(1, 15))
     
     print(f" Added SINGLE master drawing with {successful_graphs}/12 ECG leads (ZERO containers)!")
     
@@ -3542,97 +3454,93 @@ def generate_ecg_report(
         import os
         from reportlab.lib.units import mm
         
-        # STEP 1: Draw FULL PAGE pink ECG grid background on Page 2 (ECG graphs page)
-        if canvas.getPageNumber() == 2:  # Changed from 3 to 2
-            page_width, page_height = canvas._pagesize
+        # STEP 1: Draw FULL A4 PAGE pink ECG grid background with 39×56 boxes
+        if canvas.getPageNumber() == 1:  # Changed from 3 to 2
+            # Use full A4 page size
+            a4_width, a4_height = canvas._pagesize
             
-            # Fill entire page with pink background
+            # Calculate box spacing for exactly 39×56 boxes on A4
+            box_width = a4_width / 39  # 5.38mm per box for 39 boxes
+            box_height = a4_height / 56  # 5.30mm per box for 56 boxes
+            
+            # Fill entire A4 page with pink background
             canvas.setFillColor(colors.HexColor("#ffe6e6"))
-            canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
+            canvas.rect(0, 0, a4_width, a4_height, fill=1, stroke=0)
             
             # ECG grid colors - darker for better visibility
             light_grid_color = colors.HexColor("#ffd1d1")  
             
             major_grid_color = colors.HexColor("#ffb3b3")   
             
-            # Draw minor grid lines (1mm spacing) - FULL PAGE
+            # Calculate spacing for exactly 39×56 boxes on A4
+            one_mm = 1 * mm
+            five_mm = 5 * mm  # Standard ECG box size
+            
+            # Draw minor grid lines (1mm) FIRST - bottom layer
             canvas.setStrokeColor(light_grid_color)
             canvas.setLineWidth(0.6)
             
-            minor_spacing = 1 * mm
+            # Vertical minor lines - 1mm spacing
+            x_minor = 0
+            while x_minor <= a4_width:
+                canvas.line(x_minor, 0, x_minor, a4_height)
+                x_minor += one_mm
             
-            # Vertical minor lines - full page
-            x = 0
-            while x <= page_width:
-                canvas.line(x, 0, x, page_height)
-                x += minor_spacing
+            # Horizontal minor lines - 1mm spacing
+            y_minor = 0
+            while y_minor <= a4_height:
+                canvas.line(0, y_minor, a4_width, y_minor)
+                y_minor += one_mm
             
-            # Horizontal minor lines - full page
-            y = 0
-            while y <= page_height:
-                canvas.line(0, y, page_width, y)
-                y += minor_spacing
-                
-            
-            # Draw major grid lines - FULL PAGE
-            # IMPORTANT: Match waveform calculation: height/3 = 15.0 points per box
-            # For individual lead graphs: ecg_height = 45 points, so 15 points = 1 box
+            # Draw major grid lines ON TOP - standard 5mm spacing
             canvas.setStrokeColor(major_grid_color)
             canvas.setLineWidth(1.2)
             
-            # Use standard ECG paper spacing: 5mm per box
-            # 5mm = 5 * 2.834645669 points = 14.17 points per box
-            from reportlab.lib.units import mm
-            major_spacing = 5 * mm  # Standard ECG: 5mm = 14.17 points per box
+            # Vertical major lines - 5mm spacing (standard ECG)
+            x_major = 0
+            while x_major <= a4_width:
+                canvas.line(x_major, 0, x_major, a4_height)
+                x_major += five_mm
             
-            # DEBUG: Log actual grid spacing being used
-            from reportlab.lib.units import mm as mm_unit
-            
-            # Vertical major lines - full page
-            x = 0
-            while x <= page_width:
-                canvas.line(x, 0, x, page_height)
-                x += major_spacing
-            
-            # Horizontal major lines - full page
-            y = 0
-            while y <= page_height:
-                canvas.line(0, y, page_width, y)
-                y += major_spacing
+            # Horizontal major lines - 5mm spacing (standard ECG)
+            y_major = 0
+            while y_major <= a4_height:
+                canvas.line(0, y_major, a4_width, y_major)
+                y_major += five_mm
             
 
         
-        # STEP 1.5: Draw Org. and Phone No. labels on Page 1 (TOP LEFT)
+        # STEP 1.5: Draw Org. and Phone No. labels on Page 1 (TOP LEFT) - REMOVED
         if canvas.getPageNumber() == 1:
             canvas.saveState()
             
-            # Position in top-left corner (below margin)
-            x_pos = doc.leftMargin  # 30 points from left
-            y_pos = doc.height + doc.bottomMargin - 5  # 20 points from top
+            # Position in top-left corner (below margin) - REMOVED
+            # x_pos = doc.leftMargin  # 30 points from left
+            # y_pos = doc.height + doc.bottomMargin - 5  # 20 points from top
             
-            # Always draw "Org." label with value
-            canvas.setFont("Helvetica-Bold", 10)
-            canvas.setFillColor(colors.black)
-            org_label = "Org:"
-            canvas.drawString(x_pos, y_pos, org_label)
+            # Always draw "Org." label with value - REMOVED
+            # canvas.setFont("Helvetica-Bold", 10)
+            # canvas.setFillColor(colors.black)
+            # org_label = "Org:"
+            # canvas.drawString(x_pos, y_pos, org_label)
             
-            # Calculate width of label and add small gap
-            org_label_width = canvas.stringWidth(org_label, "Helvetica-Bold", 10)
-            canvas.setFont("Helvetica", 10)
-            canvas.drawString(x_pos + org_label_width + 5, y_pos, patient_org if patient_org else "")
+            # Calculate width of label and add small gap - REMOVED
+            # org_label_width = canvas.stringWidth(org_label, "Helvetica-Bold", 10)
+            # canvas.setFont("Helvetica", 10)
+            # canvas.drawString(x_pos + org_label_width + 5, y_pos, patient_org if patient_org else "")
             
-            y_pos -= 15  # Move down for next line
+            # y_pos -= 15  # Move down for next line
             
-            # Always draw "Phone No." label with value
-            canvas.setFont("Helvetica-Bold", 10)
-            canvas.setFillColor(colors.black)
-            phone_label = "Phone No:"
-            canvas.drawString(x_pos, y_pos, phone_label)
+            # Always draw "Phone No." label with value - REMOVED
+            # canvas.setFont("Helvetica-Bold", 10)
+            # canvas.setFillColor(colors.black)
+            # phone_label = "Phone No:"
+            # canvas.drawString(x_pos, y_pos, phone_label)
             
-            # Calculate width of label and add small gap
-            phone_label_width = canvas.stringWidth(phone_label, "Helvetica-Bold", 10)
-            canvas.setFont("Helvetica", 10)
-            canvas.drawString(x_pos + phone_label_width + 5, y_pos, patient_doctor_mobile if patient_doctor_mobile else "")
+            # Calculate width of label and add small gap - REMOVED
+            # phone_label_width = canvas.stringWidth(phone_label, "Helvetica-Bold", 10)
+            # canvas.setFont("Helvetica", 10)
+            # canvas.drawString(x_pos + phone_label_width + 5, y_pos, patient_doctor_mobile if patient_doctor_mobile else "")
             
             canvas.restoreState()
         
@@ -3646,7 +3554,7 @@ def generate_ecg_report(
         if os.path.exists(logo_path):
             canvas.saveState()
             # Different positioning for different pages
-            if canvas.getPageNumber() == 2:
+            if canvas.getPageNumber() == 1:
                 logo_w, logo_h = 120, 40  # bigger size for ECG page
                 # SHIFTED LEFT FROM RIGHT TOP CORNER
                 page_width, page_height = canvas._pagesize
@@ -3705,54 +3613,14 @@ def generate_ecg_report(
         except Exception:
             username = ""
 
-        # Get all patient details from dashboard_instance or data
-        patient_full_name = full_name
-        patient_age = str(age)
-        patient_gender = gender
-        patient_address = ""
-        patient_phone = ""
-        machine_serial_id = ""
-        
-        # Try to get patient details from dashboard_instance
-        if dashboard_instance:
-            if hasattr(dashboard_instance, 'user_details'):
-                user_details = dashboard_instance.user_details or {}
-                patient_full_name = user_details.get('full_name', patient_full_name)
-                patient_age = str(user_details.get('age', patient_age))
-                patient_gender = user_details.get('gender', patient_gender)
-                patient_address = user_details.get('address', '')
-                patient_phone = user_details.get('phone', '')
-                machine_serial_id = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
-        
-        # Also check data dict for machine serial
-        if not machine_serial_id:
-            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
-        
-        # Check patient dict if available
-        if patient and isinstance(patient, dict):
-            patient_full_name = patient.get('patient_name') or patient.get('name', patient_full_name)
-            patient_age = str(patient.get('age', patient_age))
-            patient_gender = patient.get('gender', patient_gender)
-            patient_address = patient.get('address', patient_address)
-            patient_phone = patient.get('phone', patient_phone)
-        
         params_entry = {
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "file": os.path.abspath(filename),
-            "report_date": date_time_str,
-            "machine_serial": machine_serial_id,
             "patient": {
-                "name": patient_full_name,
-                "age": patient_age,
-                "gender": patient_gender,
-                "address": patient_address,
-                "phone": patient_phone,
+                "name": full_name,
+                "age": str(age),
+                "gender": gender,
                 "date_time": date_time_str,
-            },
-            "user": {
-                "username": username,
-                "name": patient_full_name,
-                "phone": patient_phone,
             },
             "metrics": {
                 "HR_bpm": HR,
@@ -3769,15 +3637,6 @@ def generate_ecg_report(
             },
             "username": username  # Add username to track report ownership
         }
-        
-        # Save comprehensive JSON file alongside PDF
-        json_filename = os.path.splitext(filename)[0] + ".json"
-        try:
-            with open(json_filename, 'w', encoding='utf-8') as f:
-                json.dump(params_entry, f, indent=2, ensure_ascii=False)
-            print(f"✅ Saved comprehensive JSON report: {json_filename}")
-        except Exception as e:
-            print(f"⚠️ Could not save JSON report: {e}")
 
         existing_list = []
         if os.path.exists(index_path):
@@ -3833,8 +3692,8 @@ def generate_ecg_report(
     except Exception as e:
         print(f" Could not save parameters JSON: {e}")
 
-    # Build PDF
-    doc.build(story, onFirstPage=_draw_logo_and_footer, onLaterPages=_draw_logo_and_footer)
+    # Build PDF - single page only
+    doc.build(story, onFirstPage=_draw_logo_and_footer)
     print(f"✓ ECG Report generated: {filename}")
 
     # Optionally log history entry for ECG reports
@@ -3849,158 +3708,17 @@ def generate_ecg_report(
         except Exception as hist_err:
             print(f" Failed to append ECG history entry: {hist_err}")
     
-    # Upload complete report package to S3 (PDF + Patient Details + 12-Lead Data)
+    # Upload to cloud if configured
     try:
         import sys
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from utils.cloud_uploader import get_cloud_uploader
         
         cloud_uploader = get_cloud_uploader()
-        if cloud_uploader.is_configured() and cloud_uploader.cloud_service == 's3':
-            print(f"  Uploading complete report package to S3 ({cloud_uploader.s3_bucket})...")
-            
-            # 1. Save 12-lead ECG data (10 seconds) if ecg_test_page is available
-            ecg_data_file = None
-            if ecg_test_page:
-                try:
-                    ecg_data_file = save_ecg_data_to_file(ecg_test_page)
-                    if ecg_data_file:
-                        print(f"  Saved 12-lead ECG data (10 seconds): {ecg_data_file}")
-                except Exception as e:
-                    print(f"  Warning: Could not save ECG data: {e}")
-            
-            # 2. Prepare comprehensive patient data with all details
-            patient_data_for_upload = {}
-            if patient and isinstance(patient, dict):
-                patient_data_for_upload = patient.copy()
-            else:
-                # Try to load from all_patients.json
-                try:
-                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-                    patients_db_file = os.path.join(base_dir, "all_patients.json")
-                    if os.path.exists(patients_db_file):
-                        with open(patients_db_file, "r") as jf:
-                            all_patients = json.load(jf)
-                            if all_patients.get("patients") and len(all_patients["patients"]) > 0:
-                                patient_data_for_upload = all_patients["patients"][-1]
-                except Exception as e:
-                    print(f"  Warning: Could not load patient data: {e}")
-            
-            # Ensure all patient details are included from dashboard_instance
-            if dashboard_instance and hasattr(dashboard_instance, 'user_details'):
-                user_details = dashboard_instance.user_details or {}
-                if not patient_data_for_upload.get('patient_name') and not patient_data_for_upload.get('name'):
-                    patient_data_for_upload['patient_name'] = user_details.get('full_name', '')
-                    patient_data_for_upload['name'] = user_details.get('full_name', '')
-                if not patient_data_for_upload.get('age'):
-                    patient_data_for_upload['age'] = user_details.get('age', '')
-                if not patient_data_for_upload.get('gender'):
-                    patient_data_for_upload['gender'] = user_details.get('gender', '')
-                if not patient_data_for_upload.get('address'):
-                    patient_data_for_upload['address'] = user_details.get('address', '')
-                if not patient_data_for_upload.get('phone'):
-                    patient_data_for_upload['phone'] = user_details.get('phone', '')
-                if not patient_data_for_upload.get('serial_number'):
-                    patient_data_for_upload['serial_number'] = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
-            
-            # Also get machine serial from data
-            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
-            if machine_serial_id and not patient_data_for_upload.get('serial_number'):
-                patient_data_for_upload['serial_number'] = machine_serial_id
-            
-            # 3. Prepare comprehensive report metadata with all patient details
-            # Get patient details from dashboard_instance if available
-            patient_full_name = patient_data_for_upload.get('patient_name') or \
-                               f"{patient_data_for_upload.get('first_name', '')} {patient_data_for_upload.get('last_name', '')}".strip()
-            patient_age = str(patient_data_for_upload.get('age', ''))
-            patient_gender = patient_data_for_upload.get('gender', '')
-            patient_address = patient_data_for_upload.get('address', '')
-            patient_phone = patient_data_for_upload.get('phone', '')
-            machine_serial_id = data.get('machine_serial', '') or os.getenv('MACHINE_SERIAL_ID', '')
-            
-            # Try to get from dashboard_instance
-            if dashboard_instance and hasattr(dashboard_instance, 'user_details'):
-                user_details = dashboard_instance.user_details or {}
-                if not patient_full_name:
-                    patient_full_name = user_details.get('full_name', patient_full_name)
-                if not patient_age:
-                    patient_age = str(user_details.get('age', patient_age))
-                if not patient_gender:
-                    patient_gender = user_details.get('gender', patient_gender)
-                if not patient_address:
-                    patient_address = user_details.get('address', patient_address)
-                if not patient_phone:
-                    patient_phone = user_details.get('phone', patient_phone)
-                if not machine_serial_id:
-                    machine_serial_id = user_details.get('serial_id', '') or os.getenv('MACHINE_SERIAL_ID', '')
-            
-            report_metadata = {
-                "patient_name": patient_full_name,
-                "patient_age": patient_age,
-                "patient_gender": patient_gender,
-                "patient_address": patient_address,
-                "patient_phone": patient_phone,
-                "report_date": patient_data_for_upload.get('date_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
-                "machine_serial": machine_serial_id,
-                "heart_rate": str(data.get('Heart_Rate', data.get('HR', ''))),
-                "pr_interval": str(data.get('PR', '')),
-                "qrs_duration": str(data.get('QRS', '')),
-                "qt_interval": str(data.get('QT', '')),
-                "qtc_interval": str(data.get('QTc', '')),
-            }
-            
-            # 4. Upload complete package (PDF + Patient Details + 12-Lead Data)
-            # This will automatically queue if offline
-            result = cloud_uploader.upload_complete_report_package(
-                pdf_path=filename,
-                patient_data=patient_data_for_upload,
-                ecg_data_file=ecg_data_file,
-                report_metadata=report_metadata
-            )
-            
-            if result.get('status') == 'success':
-                upload_count = len(result.get('uploads', []))
-                print(f"✅ Complete report package uploaded successfully to S3!")
-                print(f"   Uploaded {upload_count} file(s):")
-                for upload in result.get('uploads', []):
-                    print(f"     - {upload.get('type')}: {upload.get('key')}")
-            elif result.get('status') == 'queued':
-                print(f"📥 Report package queued for upload when internet connection is restored")
-                # Also queue individual components for offline queue
-                try:
-                    from utils.offline_queue import get_offline_queue
-                    offline_queue = get_offline_queue()
-                    queue_payload = {
-                        'pdf_path': filename,
-                        'patient_data': patient_data_for_upload,
-                        'ecg_data_file': ecg_data_file,
-                        'report_metadata': report_metadata,
-                        'cloud_service': 's3'
-                    }
-                    offline_queue.queue_data('cloud_complete_package', queue_payload, priority=2)
-                    print(f"✅ Report package queued for automatic sync")
-                except Exception as e:
-                    print(f"⚠️ Could not queue report package: {e}")
-            else:
-                print(f"  ❌ S3 upload failed: {result.get('message', 'Unknown error')}")
-                # Try to queue for retry
-                try:
-                    from utils.offline_queue import get_offline_queue
-                    offline_queue = get_offline_queue()
-                    queue_payload = {
-                        'pdf_path': filename,
-                        'patient_data': patient_data_for_upload,
-                        'ecg_data_file': ecg_data_file,
-                        'report_metadata': report_metadata,
-                        'cloud_service': 's3'
-                    }
-                    offline_queue.queue_data('cloud_complete_package', queue_payload, priority=2)
-                    print(f"📥 Report package queued for retry when online")
-                except Exception as e:
-                    print(f"⚠️ Could not queue report package: {e}")
-        elif cloud_uploader.is_configured():
-            # Fallback to simple report upload for non-S3 services
+        if cloud_uploader.is_configured():
             print(f"  Uploading report to cloud ({cloud_uploader.cloud_service})...")
+            
+            # Prepare metadata
             upload_metadata = {
                 "patient_name": data.get('patient', {}).get('name', 'Unknown'),
                 "patient_age": str(data.get('patient', {}).get('age', '')),
@@ -4008,27 +3726,23 @@ def generate_ecg_report(
                 "machine_serial": data.get('machine_serial', ''),
                 "heart_rate": str(data.get('Heart_Rate', '')),
             }
+            
+            # Upload the report
             result = cloud_uploader.upload_report(filename, metadata=upload_metadata)
+            
             if result.get('status') == 'success':
-                print(f"✅ Report uploaded successfully to {cloud_uploader.cloud_service}")
+                print(f" Report uploaded successfully to {cloud_uploader.cloud_service}")
+                if 'url' in result:
+                    print(f"  URL: {result['url']}")
             else:
-                print(f"  ❌ Cloud upload failed: {result.get('message', 'Unknown error')}")
+                print(f"  Cloud upload failed: {result.get('message', 'Unknown error')}")
         else:
-            print("  ℹ️ Cloud upload not configured (see cloud_config_template.txt)")
-            print("     To enable S3 upload, set in .env:")
-            print("     CLOUD_UPLOAD_ENABLED=true")
-            print("     CLOUD_SERVICE=s3")
-            print("     AWS_S3_BUCKET=deck-backend-demo")
-            print("     AWS_S3_REGION=us-east-1")
-            print("     AWS_ACCESS_KEY_ID=...")
-            print("     AWS_SECRET_ACCESS_KEY=...")
+            print("  Cloud upload not configured (see cloud_config_template.txt)")
             
     except ImportError:
-        print("  ⚠️ Cloud uploader not available (boto3 may not be installed)")
+        print("  Cloud uploader not available")
     except Exception as e:
-        import traceback
-        print(f"  ❌ Cloud upload error: {e}")
-        traceback.print_exc()
+        print(f"  Cloud upload error: {e}")
 
 
 # REMOVE ENTIRE create_sample_ecg_images function (lines ~1222-1257)

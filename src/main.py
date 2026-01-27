@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from utils.crash_logger import get_crash_logger
 from utils.session_recorder import SessionRecorder
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtGui import QFont, QPixmap, QIntValidator
 
 # Import core modules
 try:
@@ -497,8 +497,32 @@ class LoginRegisterDialog(QDialog):
             QMessageBox.warning(self, "Error", "Invalid credentials. Please check your full name and password.")
 
     def handle_phone_login(self):
-        phone, ok = QInputDialog.getText(self, "Login with Phone Number", "Enter your phone number:")
-        if ok and phone:
+        # Create a custom input dialog so we can enforce numeric-only input
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle("Login with Phone Number")
+        dlg.setLabelText("Enter your phone number:")
+        dlg.setInputMode(QInputDialog.TextInput)
+
+        # Apply an integer validator to restrict input to digits only
+        line_edit = dlg.findChild(QLineEdit)
+        if line_edit is not None:
+            # Limit to 10-digit phone numbers:
+            # QIntValidator uses 32-bit ints, so max must be <= 2147483647.
+            # We also cap length to 10 characters to enforce 10 digits.
+            line_edit.setValidator(QIntValidator(0, 2147483647, self))
+            line_edit.setMaxLength(10)
+
+        if dlg.exec_() == QDialog.Accepted:
+            phone = dlg.textValue().strip()
+        
+            # Extra safety: ensure only digits are accepted and length is <= 10
+            if not phone.isdigit():
+                QMessageBox.warning(self, "Invalid Input", "Please enter digits only for the phone number.")
+                return
+            if len(phone) > 10:
+                QMessageBox.warning(self, "Invalid Phone Number", "Phone number must be at most 10 digits.")
+                return
+
             # Check if this is a new phone number (not in users)
             users = load_users()
             is_new_user = True
@@ -544,11 +568,15 @@ class LoginRegisterDialog(QDialog):
         age = self.reg_age.text()
         gender = self.reg_gender.text()
         address = self.reg_address.text()
-        phone = self.reg_phone.text()
+        phone = self.reg_phone.text().strip()
         password = self.reg_password.text()
         confirm = self.reg_confirm.text()
         if not all([serial_id, name, age, gender, address, phone, password, confirm]):
             QMessageBox.warning(self, "Error", "All fields are required, including Machine Serial ID.")
+            return
+        # Enforce numeric phone number with length up to 10 digits
+        if not phone.isdigit() or len(phone) > 10:
+            QMessageBox.warning(self, "Error", "Phone number must be numbers only and at most 10 digits.")
             return
         if password != confirm:
             QMessageBox.warning(self, "Error", "Passwords do not match.")

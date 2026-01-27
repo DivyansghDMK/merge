@@ -31,6 +31,10 @@ class SettingsManager:
             "factory_reset": "cancel"
         }
         self.settings = self.load_settings()
+
+        # Force EMG filter to 150Hz on every application start (User requirement)
+        # This overrides any saved setting from previous sessions.
+        self.settings["filter_emg"] = "150"
     
     def load_settings(self):
         if os.path.exists(self.settings_file):

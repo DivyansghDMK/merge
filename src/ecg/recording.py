@@ -717,7 +717,7 @@ class ECGMenu(QGroupBox):
             self.sliding_panel.slide_out()
             self.current_open_panel = None
 
-    # ----------------------------- Save ECG -----------------------------
+    # ----------------------------- Save ECG Details-----------------------------
 
     # Modified methods to use sliding panel
     def show_save_ecg(self):
@@ -738,7 +738,7 @@ class ECGMenu(QGroupBox):
             content_widget = self.create_scrollable_content(content_widget)
         except Exception:
             pass
-        self.show_sliding_panel(content_widget, self.tr("Save ECG Details"), "Save ECG")
+        self.show_sliding_panel(content_widget, self.tr("Save ECG Details"), "Save ECG Details")
 
     def get_user_specific_patient_file(self):
         """Get user-specific patient details file path"""
@@ -1177,16 +1177,16 @@ class ECGMenu(QGroupBox):
         # Close the panel after successful save (values remain persisted for next open)
         self.hide_sliding_panel()
 
-    # ----------------------------- Open ECG -----------------------------
+    # ----------------------------- Open ECG Details-----------------------------
 
     def show_open_ecg(self):
         """Show open ECG file dialog"""
         self.ensure_sliding_panel_ready()
         content_widget = self.create_open_ecg_content()
-        self.show_sliding_panel(content_widget, self.tr("Open ECG File"), "Open ECG")
+        self.show_sliding_panel(content_widget, self.tr("Open ECG File"), "Open ECG Details")
 
     def create_open_ecg_content(self):
-        # Create a simple open ECG interface
+        # Create a simple open ECG Details interface
         widget = QWidget()
         layout = QVBoxLayout(widget)
         

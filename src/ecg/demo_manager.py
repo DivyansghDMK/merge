@@ -55,8 +55,8 @@ class DemoManager:
         self._demo_paused_time = None  # Track paused time for resume
         # Smooth Y-range targets per lead so axes react gently to gain changes
         self._demo_lead_ranges = {}
-        # Delay initial plot display by 0 seconds for immediate accurate values
-        self._initial_display_delay = 0.0  # Show values immediately
+        # Delay initial plot display by 15 seconds to avoid jumping/stabilization period
+        self._initial_display_delay = 15.0  # Wait 15 seconds before first display
         self._initial_display_start = None  # Set when demo starts
         self._first_display_done = False  # Track if first display completed
         # Plot update coordination
@@ -184,92 +184,43 @@ class DemoManager:
             self._demo_started_at = None
             self._running_demo = True
             self._demo_lead_ranges.clear()
+
+            try:
+                self.ecg_test_page._use_dashboard_metrics_only = False
+                self.ecg_test_page._last_computed_metrics = {}
+            except Exception:
+                pass
             
             # Don't start the dashboard timer here - it will be handled by start_demo_data()
             # which resets _demo_started_at and the dashboard will sync via session_paused_time
-            
-            # Reset update timestamps and counters for immediate metric updates (within 10 seconds requirement)
-            if hasattr(self.ecg_test_page, '_last_metric_update_ts'):
-                self.ecg_test_page._last_metric_update_ts = 0.0
-            if hasattr(self.ecg_test_page, '_metrics_calculated_once'):
-                delattr(self.ecg_test_page, '_metrics_calculated_once')  # Reset to allow immediate first update
-            if hasattr(self.ecg_test_page, '_metrics_update_count'):
-                self.ecg_test_page._metrics_update_count = 0  # Reset counter for immediate calculations
-            
-            # Reset dashboard update timestamp for immediate sync
-            if hasattr(self.ecg_test_page, 'dashboard_instance') and self.ecg_test_page.dashboard_instance:
-                if hasattr(self.ecg_test_page.dashboard_instance, '_last_metrics_update_ts'):
-                    self.ecg_test_page.dashboard_instance._last_metrics_update_ts = 0.0
-                if hasattr(self.ecg_test_page.dashboard_instance, '_inactive_update_count'):
-                    self.ecg_test_page.dashboard_instance._inactive_update_count = 0
-                # Force immediate dashboard update
-                try:
-                    self.ecg_test_page.dashboard_instance.update_dashboard_metrics_from_ecg()
-                    print("✅ Immediate dashboard update triggered on demo start")
-                except Exception as e:
-                    print(f"⚠️ Dashboard immediate update failed: {e}")
             
                         # Immediately set hardcoded demo metrics on ECG test page and dashboard
             try:
                 # Update ECG test page metrics
                 if hasattr(self.ecg_test_page, 'metric_labels'):
-                    self.ecg_test_page.metric_labels.get('heart_rate', QLabel()).setText("100")
-                    self.ecg_test_page.metric_labels.get('pr_interval', QLabel()).setText("174")
-                    self.ecg_test_page.metric_labels.get('qrs_duration', QLabel()).setText("90")
+                    self.ecg_test_page.metric_labels.get('heart_rate', QLabel()).setText("60")
+                    self.ecg_test_page.metric_labels.get('pr_interval', QLabel()).setText("160")
+                    self.ecg_test_page.metric_labels.get('qrs_duration', QLabel()).setText("85")
                     self.ecg_test_page.metric_labels.get('st_interval', QLabel()).setText("0")
                     # QTc label may be named 'qtc_interval' depending on UI
                     if 'qtc_interval' in self.ecg_test_page.metric_labels:
-                        self.ecg_test_page.metric_labels['qtc_interval'].setText("286/369")
+                        self.ecg_test_page.metric_labels['qtc_interval'].setText("380/400")
                     print(" Demo metrics set on ECG test page")
                 
-                # Set ECG test page attributes that dashboard looks for
-                if hasattr(self.ecg_test_page, 'pr_interval'):
-                    self.ecg_test_page.pr_interval = 174
-                else:
-                    setattr(self.ecg_test_page, 'pr_interval', 174)
-                    
-                if hasattr(self.ecg_test_page, 'last_qrs_duration'):
-                    self.ecg_test_page.last_qrs_duration = 90
-                else:
-                    setattr(self.ecg_test_page, 'last_qrs_duration', 90)
-                    
-                print(f" Demo manager set QRS duration to: {self.ecg_test_page.last_qrs_duration}")  # Debug output
-                    
-                if hasattr(self.ecg_test_page, 'last_qt_interval'):
-                    self.ecg_test_page.last_qt_interval = 286
-                else:
-                    setattr(self.ecg_test_page, 'last_qt_interval', 286)
-                    
-                if hasattr(self.ecg_test_page, 'last_qtc_interval'):
-                    self.ecg_test_page.last_qtc_interval = 369
-                else:
-                    setattr(self.ecg_test_page, 'last_qtc_interval', 369)
-                    
-                if hasattr(self.ecg_test_page, 'last_st_segment'):
-                    self.ecg_test_page.last_st_segment = 0.0
-                else:
-                    setattr(self.ecg_test_page, 'last_st_segment', 0.0)
-                
                 # Update dashboard metrics (same values)
-                if hasattr(self.ecg_test_page, 'parent') and hasattr(self.ecg_test_page.parent, 'metric_labels'):
-                    dashboard = self.ecg_test_page.parent
-                    dashboard.metric_labels.get('heart_rate', QLabel()).setText("100 BPM")
-                    dashboard.metric_labels.get('pr_interval', QLabel()).setText("174 ms")
-                    dashboard.metric_labels.get('qrs_duration', QLabel()).setText("90 ms")
+                dashboard = getattr(self.ecg_test_page, 'dashboard_instance', None)
+                if dashboard is None:
+                    dashboard = getattr(self.ecg_test_page, 'parent', None)
+                if dashboard is not None and hasattr(dashboard, 'metric_labels'):
+                    dashboard.metric_labels.get('heart_rate', QLabel()).setText("60 BPM")
+                    dashboard.metric_labels.get('pr_interval', QLabel()).setText("160 ms")
+                    dashboard.metric_labels.get('qrs_duration', QLabel()).setText("85 ms")
                     dashboard.metric_labels.get('st_interval', QLabel()).setText("0 ms")
                     if 'qtc_interval' in dashboard.metric_labels:
-                        dashboard.metric_labels['qtc_interval'].setText("286/369 ms")
+                        dashboard.metric_labels['qtc_interval'].setText("380/400 ms")
                     # Optional: reflect demo sampling rate if shown
                     dashboard.metric_labels.get('sampling_rate', QLabel()).setText("80 Hz")
                     print(" Demo metrics set on dashboard")
-                    
-                    # Force immediate sync to ensure both pages show values immediately
-                    try:
-                        if hasattr(dashboard, 'sync_dashboard_metrics_to_ecg_page'):
-                            dashboard.sync_dashboard_metrics_to_ecg_page()
-                            print(" Immediate sync completed - both pages updated")
-                    except Exception as e:
-                        print(f" Immediate sync failed: {e}")
             except Exception as e:
                 print(f" Could not set demo metrics: {e}")
             
@@ -320,36 +271,34 @@ class DemoManager:
             finally:
                 self._previous_wave_speed = None
             
-            # Reset all metrics to zero when demo mode is turned OFF
             try:
-                # Reset ECG test page metrics to zero
-                if hasattr(self.ecg_test_page, 'metric_labels'):
-                    self.ecg_test_page.metric_labels.get('heart_rate', QLabel()).setText("  0")
-                    self.ecg_test_page.metric_labels.get('pr_interval', QLabel()).setText("  0")
-                    self.ecg_test_page.metric_labels.get('qrs_duration', QLabel()).setText(" 0")
-                    self.ecg_test_page.metric_labels.get('st_segment', QLabel()).setText("0")
-                    if 'qtc_interval' in self.ecg_test_page.metric_labels:
-                        self.ecg_test_page.metric_labels['qtc_interval'].setText("0/0")
-                    # Reset elapsed time to zero
-                    if 'time_elapsed' in self.ecg_test_page.metric_labels:
-                        self.ecg_test_page.metric_labels['time_elapsed'].setText("00:00")
-                    print(" ECG test page metrics reset to zero")
-                
-                # Keep dashboard interval values unchanged when demo mode is turned OFF
-                # Only reset time-related metrics, not interval values
-                if hasattr(self.ecg_test_page, 'parent') and hasattr(self.ecg_test_page.parent, 'metric_labels'):
-                    dashboard = self.ecg_test_page.parent
-                    # Reset only time-related metrics, keep interval values unchanged
-                    dashboard.metric_labels.get('heart_rate', QLabel()).setText("0 BPM")
-                    dashboard.metric_labels.get('sampling_rate', QLabel()).setText("0 Hz")
-                    # Reset elapsed time to zero
-                    if 'time_elapsed' in dashboard.metric_labels:
-                        dashboard.metric_labels['time_elapsed'].setText("00:00")
-                    # Note: PR interval, QRS duration, QRS axis, ST interval, QTc interval
-                    # are NOT reset - they remain at their current values
-                    print(" Dashboard time metrics reset, interval values preserved")
+                # Ensure outer dashboard shows the same demo metrics as the ECG page (if available)
+                # so Back navigation doesn't revert to old real values.
+                dashboard = getattr(self.ecg_test_page, 'dashboard_instance', None)
+                if dashboard is None:
+                    dashboard = getattr(self.ecg_test_page, 'parent', None)
+                if hasattr(self.ecg_test_page, 'metric_labels') and dashboard is not None and hasattr(dashboard, 'metric_labels'):
+                    try:
+                        hr = self.ecg_test_page.metric_labels.get('heart_rate', QLabel()).text()
+                        pr = self.ecg_test_page.metric_labels.get('pr_interval', QLabel()).text()
+                        qrs = self.ecg_test_page.metric_labels.get('qrs_duration', QLabel()).text()
+                        st = self.ecg_test_page.metric_labels.get('st_interval', QLabel()).text() if 'st_interval' in self.ecg_test_page.metric_labels else None
+                        qtc = self.ecg_test_page.metric_labels.get('qtc_interval', QLabel()).text() if 'qtc_interval' in self.ecg_test_page.metric_labels else None
+                    except Exception:
+                        hr = pr = qrs = st = qtc = None
+
+                    if hr:
+                        dashboard.metric_labels.get('heart_rate', QLabel()).setText(f"{hr} BPM")
+                    if pr:
+                        dashboard.metric_labels.get('pr_interval', QLabel()).setText(f"{pr} ms")
+                    if qrs:
+                        dashboard.metric_labels.get('qrs_duration', QLabel()).setText(f"{qrs} ms")
+                    if st is not None:
+                        dashboard.metric_labels.get('st_interval', QLabel()).setText(f"{st} ms")
+                    if qtc and 'qtc_interval' in dashboard.metric_labels:
+                        dashboard.metric_labels['qtc_interval'].setText(f"{qtc} ms")
             except Exception as e:
-                print(f" Could not reset metrics to zero: {e}")
+                print(f" Could not preserve demo metrics on dashboard: {e}")
             
             # Reset time tracking variables to zero
             self._demo_started_at = None
@@ -692,10 +641,10 @@ class DemoManager:
             # (Demo mode should always start from zero, not resume from paused time)
             self._demo_started_at = time.time()
             self._demo_paused_time = None  # Ensure paused time is cleared
-            print(f" Demo starting - displaying values immediately (no delay)")
+            print(f" Demo starting - collecting data for {self._initial_display_delay} seconds before display (to avoid jumping)")
             
-            # DO NOT update plots immediately - show values right away
-            # Data will be collected and displayed immediately for accuracy
+            # DO NOT update plots immediately - wait for stabilization period
+            # Data will be collected in background, but plots won't update until stable
 
             # Start reading data row by row from CSV with wave speed control
             def read_csv_data():
@@ -1208,27 +1157,37 @@ class DemoManager:
                         mean_rr = np.mean(rr_intervals)
                         heart_rate = 60 / mean_rr if mean_rr > 0 else None
                         
-                        # Use completely fixed demo values - no live calculations
-                        heart_rate = 100    # Fixed heart rate (no flickering)
-                        pr_interval = 174  # Fixed PR interval (no flickering)
-                        qrs_duration = 90   # Fixed QRS duration (no flickering)
-                        qt_interval = 286   # Fixed QT interval (no flickering)
+                        # Apply demo heart rate correction
+                        if heart_rate and heart_rate > 100:
+                            # If demo heart rate is too high, apply correction factor
+                            correction_factor = 0.6  # Reduce by 40%
+                            heart_rate = heart_rate * correction_factor
+                            print(f" Demo heart rate corrected: {heart_rate:.1f} BPM")
                         
-                        # Calculate QTc from fixed values
-                        qtc_result = self._calculate_qtc_interval(qt_interval, heart_rate)
+                        # Apply demo heart rate smoothing
+                        if heart_rate and 30 <= heart_rate <= 200:
+                            self.demo_heart_rates.append(heart_rate)
+                            if len(self.demo_heart_rates) > 3:
+                                self.demo_heart_rates.pop(0)
+                            
+                            # Use smoothed heart rate for demo
+                            heart_rate = np.mean(self.demo_heart_rates)
+                            self._debug(f"smoothed heart rate {heart_rate:.1f} BPM")
+                        
+                        # Calculate P, Q, S, T peaks
+                        q_peaks, s_peaks = self._calculate_qs_peaks(centered_data, r_peaks, sampling_rate)
+                        p_peaks = self._calculate_p_peaks(centered_data, q_peaks, sampling_rate)
+                        t_peaks = self._calculate_t_peaks(centered_data, s_peaks, sampling_rate)
+                        
+                        # Calculate intervals
+                        pr_interval = self._calculate_pr_interval(p_peaks, r_peaks, sampling_rate)
+                        qrs_duration = self._calculate_qrs_duration(q_peaks, s_peaks, sampling_rate)
+                        qt_interval = self._calculate_qt_interval(q_peaks, t_peaks, sampling_rate)
+                        qtc_interval = self._calculate_qtc_interval(qt_interval, heart_rate)
                         
                         # Store both QT and QTc for display
                         qt_value = int(round(qt_interval)) if (qt_interval is not None and qt_interval >= 0) else 380
-                        
-                        # Handle QTc results (both Bazett and Fridericia)
-                        if qtc_result and isinstance(qtc_result, dict):
-                            qtc_bazett = int(round(qtc_result['qtc_bazett'])) if qtc_result['qtc_bazett'] else 400
-                            qtc_fridericia = int(round(qtc_result['qtc_fridericia'])) if qtc_result['qtc_fridericia'] else 400
-                            qtc_value = qtc_fridericia  # Use Fridericia as primary
-                        else:
-                            qtc_bazett = int(round(qtc_result)) if qtc_result else 400
-                            qtc_fridericia = qtc_bazett  # Fallback
-                            qtc_value = qtc_bazett
+                        qtc_value = int(round(qtc_interval)) if (qtc_interval is not None and qtc_interval >= 0) else 400
                         
                         # Get calculation functions at runtime to avoid circular import
                         calculate_st_segment = self._get_calculation_functions()
@@ -1250,23 +1209,21 @@ class DemoManager:
                         # Initialize fixed demo metrics once, then keep constant
                         if self._demo_fixed_metrics is None:
                             try:
-                                fixed_hr = 100  # BPM (fixed to match your requirement)
-                                fixed_pr = 174  # ms (correct PR interval at 100 BPM)
-                                fixed_qrs = 90  # ms (correct QRS duration at 100 BPM)
-                                fixed_qt = 286  # ms (correct QT interval at 100 BPM)
-                                fixed_qtc = 369  # ms (correct QTc at 100 BPM)
+                                fixed_hr = 60  # BPM (fixed)
+                                fixed_pr = 160  # ms (fixed)
+                                fixed_qrs = 85  # ms (fixed)
+                                fixed_qt = qt_value  # Calculated QT
+                                fixed_qtc = qtc_value  # Calculated QTc
                                 fixed_axis = "0°"
-                                fixed_st = 0  # ms (correct ST segment)
+                                fixed_st = 90  # ms (fixed)
                             except Exception:
-                                fixed_hr, fixed_pr, fixed_qrs, fixed_qt, fixed_qtc, fixed_axis, fixed_st = 100, 174, 90, 286, 369, "0°", 0
+                                fixed_hr, fixed_pr, fixed_qrs, fixed_qt, fixed_qtc, fixed_axis, fixed_st = 60, 160, 85, 380, 400, "0°", 90
                             self._demo_fixed_metrics = {
                                 'Heart_Rate': fixed_hr,
                                 'PR': fixed_pr,
                                 'QRS': fixed_qrs,
                                 'QT': fixed_qt,
                                 'QTc': fixed_qtc,
-                                'QTc_Bazett': qtc_bazett,  # Add Bazett value
-                                'QTc_Fridericia': qtc_fridericia,  # Add Fridericia value
                                 'QTc_interval': f"{fixed_qt}/{fixed_qtc}",  # Display as QT/QTc format
                                 'ST': fixed_st
                             }
@@ -1363,19 +1320,9 @@ class DemoManager:
         return None
     
     def _calculate_qtc_interval(self, qt_interval, heart_rate):
-        """Calculate QTc interval using both Bazett and Fridericia formulas"""
+        """Calculate QTc interval using Bazett's formula"""
         if qt_interval and heart_rate:
-            # Bazett's formula: QTc = QT / sqrt(RR/60)
-            qtc_bazett = qt_interval / np.sqrt(60 / heart_rate)
-            
-            # Fridericia's formula: QTcF = QT / (RR/60)^(1/3)
-            qtc_fridericia = qt_interval / ((60 / heart_rate) ** (1/3))
-            
-            return {
-                'qtc_bazett': qtc_bazett,
-                'qtc_fridericia': qtc_fridericia,
-                'qtc_combined': qtc_fridericia  # Use Fridericia as primary (more accurate at high HR)
-            }
+            return qt_interval / np.sqrt(60 / heart_rate)
         return None
 
     def _debug(self, message):
@@ -1408,11 +1355,12 @@ class DemoManager:
 
         # Clear demo data and plots safely
         try:
+            target_size = getattr(self.ecg_test_page, 'max_buffer_size', 10000)
             with self._lock:
                 for i in range(len(self.ecg_test_page.data)):
-                    self.ecg_test_page.data[i] = np.zeros(self.ecg_test_page.buffer_size)
+                    self.ecg_test_page.data[i] = np.zeros(target_size)
                 for line in self.ecg_test_page.data_lines:
-                    line.setData(np.zeros(self.ecg_test_page.buffer_size))
+                    line.setData(np.zeros(target_size))
             print(" Demo data cleared and plots reset")
         except Exception:
             pass

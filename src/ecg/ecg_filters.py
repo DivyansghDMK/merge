@@ -219,10 +219,10 @@ def apply_emg_filter(signal: np.ndarray, sampling_rate: float, emg_filter: str) 
     try:
         cutoff_freq = float(emg_filter)
         # Use 35-40 Hz range for EMG suppression (low-pass, not high-pass)
-        if cutoff_freq < 35:
-            cutoff_freq = 35.0
-        elif cutoff_freq > 40:
-            cutoff_freq = 40.0
+        # if cutoff_freq < 35:
+        #     cutoff_freq = 35.0
+        # elif cutoff_freq > 40:
+        #     cutoff_freq = 40.0
         
         # Design low-pass Butterworth filter
         nyquist = sampling_rate / 2.0
@@ -373,11 +373,17 @@ def apply_ecg_filters(
         filtered = apply_dft_filter(filtered, sampling_rate, dft_filter)
     
     # 2. EMG Filter second (removes muscle artifacts)
-    if emg_filter:
+    emg_suppresses_ac = False
+    if emg_filter and str(emg_filter).lower() != "off":
+        try:
+            if float(emg_filter) < 60:
+                emg_suppresses_ac = True
+        except ValueError:
+            pass
         filtered = apply_emg_filter(filtered, sampling_rate, emg_filter)
     
     # 3. AC Filter last (removes power line interference)
-    if ac_filter:
+    if ac_filter and not emg_suppresses_ac:
         filtered = apply_ac_filter(filtered, sampling_rate, ac_filter)
     
     return filtered

@@ -20,11 +20,12 @@ from matplotlib.figure import Figure
 import matplotlib.patches as patches
 from .arrhythmia_detector import ArrhythmiaDetector
 try:
-    from .ecg_filters import extract_respiration, estimate_baseline_drift, apply_ac_filter
+    from .ecg_filters import extract_respiration, estimate_baseline_drift, apply_ac_filter, apply_emg_filter
 except ImportError:
     extract_respiration = None
     estimate_baseline_drift = None
     apply_ac_filter = None
+    apply_emg_filter = None
 try:
     from .clinical_measurements import (
         build_median_beat, get_tp_baseline, measure_pr_from_median_beat,
@@ -1383,9 +1384,27 @@ class ExpandedLeadView(QDialog):
             except Exception as filter_error:
                 print(f" Expanded view display filter error: {filter_error}")
 
+            # Apply EMG filter from settings for display if enabled
+            try:
+                emg_applied = False
+                emg_suppresses_ac = False
+                if 'apply_emg_filter' in globals() and apply_emg_filter is not None and hasattr(self._parent, 'settings_manager'):
+                    emg_opt = str(self._parent.settings_manager.get_setting('filter_emg', '150')).strip()
+                    if emg_opt and emg_opt.lower() != 'off':
+                         display_signal = apply_emg_filter(display_signal, float(self.sampling_rate), emg_opt)
+                         emg_applied = True
+                         try:
+                             if float(emg_opt) < 60:
+                                 emg_suppresses_ac = True
+                         except ValueError:
+                             pass
+            except Exception as _emg_err:
+                 print(f" Expanded view EMG filter error: {_emg_err}")
+
             # Apply AC filter (50/60 Hz) from settings for display
             try:
-                if 'apply_ac_filter' in globals() and apply_ac_filter is not None and hasattr(self._parent, 'settings_manager'):
+                # Apply AC filter if enabled
+                if (not emg_applied or not emg_suppresses_ac) and 'apply_ac_filter' in globals() and apply_ac_filter is not None and hasattr(self._parent, 'settings_manager'):
                     ac_opt = str(self._parent.settings_manager.get_setting('filter_ac', 'off')).strip()
                     if ac_opt in ('50', '60'):
                         display_signal = apply_ac_filter(display_signal, float(self.sampling_rate), ac_opt)
