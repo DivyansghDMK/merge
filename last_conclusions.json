@@ -1,17 +1,13 @@
 {
-  "timestamp": "2026-01-27 13:33:36",
+  "timestamp": "2026-01-27 16:00:28",
   "findings": [
-    "Rhythm Analysis",
     "Normal heart rate",
     "Normal PR interval",
-    "Wide QRS complex",
+    "Normal QRS duration",
     "Normal QTc interval",
     "Low HRV"
   ],
   "recommendations": [
-    "Review detected arrhythmia pattern, consult physician if persistent",
-    "12-lead ECG analysis recommended for conduction pattern assessment",
-    "May indicate bundle branch block, ventricular rhythm, or hyperkalemia",
     "Ensure adequate rest and stress management",
     "Consider relaxation techniques, adequate sleep, and regular exercise"
   ]
