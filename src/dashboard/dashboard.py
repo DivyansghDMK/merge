@@ -1936,8 +1936,9 @@ class Dashboard(QWidget):
             # Adding range validation for safety
             qtc_bazett = max(300, min(500, qtc_bazett))  # Extended safety range
             
-            # ST Segment: Normal range -50 to +50 mV, relatively stable
-            st_segment = 0  # Normal baseline
+            # P Duration: Normal range 60-120ms, relatively stable
+            # Standard P wave duration is typically 80-100ms, slight variation with HR
+            p_duration = max(60, min(120, 80 + (bpm - 60) * 0.1))
             
             return {
                 'heart_rate': int(round(bpm)),
@@ -1945,7 +1946,8 @@ class Dashboard(QWidget):
                 'qrs_duration': int(round(qrs_duration)),
                 'qt_interval': int(round(qt_interval)),
                 'qtc_interval': f"{int(round(qt_interval))}/{int(round(qtc_bazett))}",
-                'st_interval': f"{st_segment}"
+                'p_duration': int(round(p_duration)),
+                'st_interval': f"{int(round(p_duration))}"  # st_interval stores P duration (label shows "P")
             }
             
         except Exception as e:
@@ -2208,8 +2210,10 @@ class Dashboard(QWidget):
                         p_duration = measure_p_duration_from_median_beat(median_beat, time_axis, fs, tp_baseline)
                         if p_duration is None or p_duration <= 0:
                             p_duration = 0
-                        # Store P duration (may be used later)
-                        metrics['p_duration'] = int(round(p_duration))
+                        # Store P duration in both p_duration and st_interval (st_interval label shows P)
+                        p_duration_int = int(round(p_duration))
+                        metrics['p_duration'] = p_duration_int
+                        metrics['st_interval'] = str(p_duration_int)  # Use P duration, not ST interval
                         
                         # Calculate QT Interval from median beat (real formula)
                         qt_val = measure_qt_from_median_beat(median_beat, time_axis, fs, tp_baseline, rr_ms=rr_ms)
@@ -2237,23 +2241,22 @@ class Dashboard(QWidget):
                             metrics['qtc_interval'] = str(qtc_int)
                         else:
                             metrics['qtc_interval'] = "0"
-                        
-                        # ST Segment (set to 0 for now, can be calculated separately if needed)
-                        metrics['st_interval'] = "0"
                     else:
                         # Fallback if median beat cannot be built
                         metrics['pr_interval'] = 0
                         metrics['qrs_duration'] = 0
                         metrics['qt_interval'] = 0
                         metrics['qtc_interval'] = "0"
-                        metrics['st_interval'] = "0"
+                        metrics['p_duration'] = 0
+                        metrics['st_interval'] = "0"  # P duration = 0
                 else:
                     # Not enough beats for median beat calculation
                     metrics['pr_interval'] = 0
                     metrics['qrs_duration'] = 0
                     metrics['qt_interval'] = 0
                     metrics['qtc_interval'] = "0"
-                    metrics['st_interval'] = "0"
+                    metrics['p_duration'] = 0
+                    metrics['st_interval'] = "0"  # P duration = 0
                     
             except ImportError as e:
                 print(f" ⚠️ Clinical measurement functions not available: {e}")
@@ -2262,7 +2265,8 @@ class Dashboard(QWidget):
                 metrics['qrs_duration'] = 0
                 metrics['qt_interval'] = 0
                 metrics['qtc_interval'] = "0"
-                metrics['st_interval'] = "0"
+                metrics['p_duration'] = 0
+                metrics['st_interval'] = "0"  # P duration = 0
             except Exception as e:
                 print(f" ⚠️ Error calculating real ECG metrics: {e}")
                 # Fallback on error
@@ -2270,7 +2274,8 @@ class Dashboard(QWidget):
                 metrics['qrs_duration'] = 0
                 metrics['qt_interval'] = 0
                 metrics['qtc_interval'] = "0"
-                metrics['st_interval'] = "0"
+                metrics['p_duration'] = 0
+                metrics['st_interval'] = "0"  # P duration = 0
             
             return metrics
             
@@ -2308,13 +2313,13 @@ class Dashboard(QWidget):
                     else:
                         self.metric_labels['heart_rate'].setText(f"{hr_int} BPM")
 
-            # ------- PR / QRS / P(ST) / QT/QTc: update at most every 6 seconds -------
+            # ------- PR / QRS / P / QT/QTc: update at most every 6 seconds -------
             # Build a compact snapshot of the interval metrics we care about
             pr_val   = ecg_metrics.get('pr_interval')
             qrs_val  = ecg_metrics.get('qrs_duration')
-            st_val   = ecg_metrics.get('st_interval')
+            p_val    = ecg_metrics.get('st_interval')  # st_interval stores P duration (label shows "P")
             qtc_raw  = ecg_metrics.get('qtc_interval')
-            interval_snapshot = (pr_val, qrs_val, st_val, qtc_raw)
+            interval_snapshot = (pr_val, qrs_val, p_val, qtc_raw)
 
             # Initialise tracking state
             if not hasattr(self, '_last_interval_metrics_ts'):
@@ -2337,9 +2342,9 @@ class Dashboard(QWidget):
                 if qrs_val is not None and 'qrs_duration' in self.metric_labels:
                     self.metric_labels['qrs_duration'].setText(f"{qrs_val} ms")
 
-                # Update ST Interval (used as P duration / ST)
-                if st_val is not None and 'st_interval' in self.metric_labels:
-                    self.metric_labels['st_interval'].setText(f"{st_val}")
+                # Update P Duration (stored in st_interval key, label shows "P")
+                if p_val is not None and 'st_interval' in self.metric_labels:
+                    self.metric_labels['st_interval'].setText(f"{p_val} ms")
 
                 # Update QT/QTc interval text
                 if qtc_raw is not None and 'qtc_interval' in self.metric_labels:
@@ -2733,7 +2738,7 @@ class Dashboard(QWidget):
                 hr_text = ecg_metrics.get('heart_rate', '0')
                 pr_text = ecg_metrics.get('pr_interval', '0')
                 qrs_text = ecg_metrics.get('qrs_duration', '0')
-                st_text = ecg_metrics.get('st_interval', '0')
+                p_text = ecg_metrics.get('st_interval', '0')  # st_interval stores P duration (label shows "P")
                 qtc_text = ecg_metrics.get('qtc_interval', '0')
                 if 'heart_rate' in self.metric_labels:
                     self.metric_labels['heart_rate'].setText(f"{hr_text} BPM")
@@ -2743,7 +2748,9 @@ class Dashboard(QWidget):
                     self.metric_labels['qrs_duration'].setText(f"{qrs_text} ms")
                 key = 'st_interval' if 'st_interval' in self.metric_labels else 'st_segment'
                 if key in self.metric_labels:
-                    self.metric_labels[key].setText(f"{st_text}")
+                    # Display P duration with ms unit (remove any existing units first)
+                    p_val = str(p_text).replace(' ms', '').replace('mV', '').strip()
+                    self.metric_labels[key].setText(f"{p_val} ms")
                 if 'qtc_interval' in self.metric_labels:
                     self.metric_labels['qtc_interval'].setText(str(qtc_text))
                 self._last_metrics_update_ts = _time.time()
@@ -2758,7 +2765,7 @@ class Dashboard(QWidget):
                     self.metric_labels['pr_interval'].setText(f"{default_metrics['pr_interval']} ms")
                     self.metric_labels['qrs_duration'].setText(f"{default_metrics['qrs_duration']} ms")
                     self.metric_labels['qtc_interval'].setText(f"{default_metrics['qtc_interval']} ms")
-                    self.metric_labels['st_interval'].setText(f"{default_metrics['st_interval']} mV")
+                    self.metric_labels['st_interval'].setText(f"{default_metrics['st_interval']} ms")  # P duration in ms
         except Exception as e:
             print(f" Error updating dashboard metrics from ECG: {e}")
     
