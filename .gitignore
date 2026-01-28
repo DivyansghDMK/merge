@@ -141,6 +141,9 @@ Thumbs.db
 # Test files
 test_*.py
 *_test.py
+# Exceptions: These are application modules, not test files
+!src/ecg/hrv_test.py
+!src/ecg/hyperkalemia_test.py
 tests/
 
 # Documentation builds
